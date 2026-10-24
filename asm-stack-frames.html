@@ -1,0 +1,1731 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assembly stack frames</title>
+<style>
+/* Whiteboard engine styles. Colors are tokens so a board can be re-themed in one place. */
+:root {
+  --wb-canvas: #F5F8FA;
+  --wb-grid: #E8EFF3;
+  --wb-grid-major: #DAE5EB;
+  --wb-ink: #1E2B46;          /* marker navy: text, arrows, braces */
+  --wb-ink-soft: #5B6A82;
+  --wb-line: #C6D2DC;
+  --wb-blue: #2A62B8;         /* selection + blue marker */
+  --wb-red: #C23A3A;
+  --wb-green: #22784B;
+  --wb-yellow: #FFF0A3;
+  --wb-mint: #D7F0E0;
+  --wb-sky: #DAE8FA;
+  --wb-rose: #FADDE2;
+  --wb-fog: #E9EDF2;
+  --wb-tray: #1E2B46;
+  --wb-tray-ink: #E6ECF5;
+  --wb-tray-hi: #F5F8FA;
+  --wb-font: ui-rounded, "SF Pro Rounded", "Nunito", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --wb-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--wb-canvas); color: var(--wb-ink); font-family: var(--wb-ui); }
+#wb-root { position: fixed; inset: 0; }
+
+/* ---------- canvas ---------- */
+.wb-stage {
+  position: absolute; inset: 0; overflow: hidden; outline: none; touch-action: none; cursor: default;
+  background-color: var(--wb-canvas);
+  background-image:
+    linear-gradient(var(--wb-grid-major) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wb-grid-major) 1px, transparent 1px),
+    linear-gradient(var(--wb-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wb-grid) 1px, transparent 1px);
+}
+.wb-stage.is-zoomed-out { background-image:
+    linear-gradient(var(--wb-grid-major) 1px, transparent 1px),
+    linear-gradient(90deg, var(--wb-grid-major) 1px, transparent 1px); }
+.wb-stage.space-pan, .wb-stage.is-panning { cursor: grab; }
+.wb-stage.is-panning { cursor: grabbing; }
+.wb-stage.tool-text { cursor: text; }
+.wb-stage.tool-arrow { cursor: crosshair; }
+.wb-stage.is-dragging iframe, .wb-stage.tool-arrow iframe, .wb-stage.is-linking iframe, .wb-stage.space-pan iframe { pointer-events: none; }
+.wb-stage.is-dragging, .wb-stage.is-linking { user-select: none; }
+
+.wb-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.wb-boxes { position: absolute; left: 0; top: 0; }
+.wb-links { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+
+/* ---------- boxes ---------- */
+.wb-box { position: absolute; box-sizing: border-box; }
+.wb-box.is-selected, .wb-box.is-editing { outline: 2px solid var(--wb-blue); outline-offset: 3px; }
+.wb-box.is-member { outline: 1.5px dashed var(--wb-blue); outline-offset: 5px; }
+.wb-box.is-drop { outline: 3px solid var(--wb-blue); outline-offset: 4px; }
+
+/* text */
+.wb-txt { white-space: pre-wrap; overflow-wrap: break-word; font-family: var(--wb-font); font-size: 15px; line-height: 1.45; outline: none; min-height: 1.45em; }
+.wb-txt b { font-weight: 750; }
+.wb-txt code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; background: rgba(30, 43, 70, .07); padding: 0 .25em; border-radius: 3px; }
+.is-editing .wb-txt { cursor: text; }
+
+.v-card { background: #fff; border: 1.5px solid var(--wb-line); border-radius: 6px; padding: 9px 12px; }
+.v-note { background: var(--wb-yellow); border-radius: 2px; padding: 12px 14px; box-shadow: 0 1px 0 rgba(30, 43, 70, .08), 0 10px 18px -12px rgba(30, 43, 70, .38); }
+.v-title .wb-txt { font-size: 32px; line-height: 1.15; font-weight: 800; letter-spacing: -.012em; }
+.v-heading .wb-txt { font-size: 20px; line-height: 1.25; font-weight: 700; }
+.v-bare { padding: 2px 0; }
+
+.v-card.c-yellow, .v-note.c-yellow { background: var(--wb-yellow); }
+.v-card.c-green, .v-note.c-green { background: var(--wb-mint); }
+.v-card.c-blue, .v-note.c-blue { background: var(--wb-sky); }
+.v-card.c-pink, .v-note.c-pink { background: var(--wb-rose); }
+.v-card.c-gray, .v-note.c-gray { background: var(--wb-fog); }
+.v-card.c-yellow { border-color: #E6D166; }
+.v-card.c-green { border-color: #A9D9BB; }
+.v-card.c-blue { border-color: #A8C6EE; }
+.v-card.c-pink { border-color: #EDB3BD; }
+.v-card.c-gray { border-color: #CCD4DE; }
+:is(.v-title, .v-heading, .v-bare).c-blue { color: var(--wb-blue); }
+:is(.v-title, .v-heading, .v-bare).c-green { color: var(--wb-green); }
+:is(.v-title, .v-heading, .v-bare).c-pink { color: var(--wb-red); }
+:is(.v-title, .v-heading, .v-bare).c-gray { color: var(--wb-ink-soft); }
+:is(.v-title, .v-heading, .v-bare).c-yellow .wb-txt { display: inline; background: linear-gradient(transparent 58%, var(--wb-yellow) 58%); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+
+/* picture */
+.t-picture { background: #fff; border: 1px solid var(--wb-line); border-radius: 4px; padding: 6px; display: flex; flex-direction: column; gap: 6px; }
+.wb-pic { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.wb-pic img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
+.wb-caption { font-family: var(--wb-font); font-size: 13px; color: var(--wb-ink-soft); text-align: center; line-height: 1.3; flex: none; }
+.wb-broken-msg { display: none; font-size: 12px; color: var(--wb-red); text-align: center; padding: 8px; }
+.is-broken .wb-pic img { display: none; }
+.is-broken .wb-broken-msg { display: block; }
+
+/* diagram */
+.t-diagram { background: #fff; border: 1.5px solid var(--wb-ink-soft); border-radius: 8px; display: flex; flex-direction: column; overflow: hidden; }
+.t-diagram.is-selected { overflow: visible; }
+.wb-dhead { height: 28px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 10px; background: var(--wb-fog); border-bottom: 1px solid var(--wb-line); border-radius: 6px 6px 0 0; font-size: 12.5px; font-weight: 600; color: var(--wb-ink); cursor: grab; user-select: none; white-space: nowrap; overflow: hidden; }
+.wb-dhead .wb-ico { width: 15px; height: 15px; color: var(--wb-ink-soft); }
+.wb-dbody { flex: 1; min-height: 0; border-radius: 0 0 6px 6px; overflow: hidden; }
+.wb-dbody iframe { border: 0; width: 100%; height: 100%; display: block; background: #fff; }
+
+/* resize handle */
+.wb-resize { position: absolute; right: -8px; bottom: -8px; width: 12px; height: 12px; border-radius: 3px; background: #fff; border: 2px solid var(--wb-blue); display: none; cursor: nwse-resize; box-sizing: border-box; z-index: 2; }
+.is-selected > .wb-resize { display: block; }
+.t-text > .wb-resize { top: 50%; bottom: auto; margin-top: -6px; cursor: ew-resize; }
+
+/* ---------- arrows & braces ---------- */
+.wb-stroke { fill: none; stroke: var(--wb-ink); stroke-width: 2; stroke-linecap: round; }
+.wb-head { fill: var(--wb-ink); stroke: var(--wb-ink); stroke-width: 1; stroke-linejoin: round; }
+.wb-stroke-outer { fill: none; stroke: var(--wb-ink); stroke-width: 7; }
+.wb-stroke-inner { fill: none; stroke: var(--wb-canvas); stroke-width: 3; }
+.wb-head-open { fill: none; stroke: var(--wb-ink); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.wb-arrow.is-selected .wb-stroke, .wb-arrow.is-selected .wb-stroke-outer, .wb-arrow.is-selected .wb-head-open { stroke: var(--wb-blue); }
+.wb-arrow.is-selected .wb-head { fill: var(--wb-blue); stroke: var(--wb-blue); }
+.wb-hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; cursor: pointer; }
+.wb-link-label { font: 600 13px var(--wb-font); fill: var(--wb-ink); paint-order: stroke; stroke: var(--wb-canvas); stroke-width: 6px; stroke-linejoin: round; pointer-events: all; cursor: pointer; }
+.wb-brace-path { fill: none; stroke: var(--wb-ink); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.wb-brace.is-selected .wb-brace-path { stroke: var(--wb-blue); }
+.wb-brace-label { font: 700 14px var(--wb-font); fill: var(--wb-ink); pointer-events: all; cursor: pointer; paint-order: stroke; stroke: var(--wb-canvas); stroke-width: 5px; stroke-linejoin: round; }
+.wb-brace.is-selected .wb-brace-label { fill: var(--wb-blue); }
+.wb-handle { fill: #fff; stroke: var(--wb-blue); stroke-width: 2; pointer-events: all; cursor: grab; }
+.wb-handle.mid { fill: var(--wb-blue); stroke: #fff; }
+.wb-draft { fill: none; stroke: var(--wb-blue); stroke-width: 2; stroke-dasharray: 6 5; }
+.wb-draft-dot { fill: var(--wb-blue); }
+
+.wb-marquee { position: absolute; border: 1.5px dashed var(--wb-blue); background: rgba(42, 98, 184, .06); pointer-events: none; }
+
+/* ---------- chrome ---------- */
+.wb-top { position: fixed; left: 14px; top: 12px; display: flex; align-items: center; gap: 10px; pointer-events: none; max-width: calc(100vw - 28px); }
+.wb-board-title { font: 700 14px var(--wb-ui); color: var(--wb-ink); background: rgba(255, 255, 255, .88); border: 1px solid var(--wb-line); padding: 6px 10px; border-radius: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wb-status { font-size: 12.5px; color: var(--wb-ink-soft); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.wb-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dot, #3BA776); flex: none; }
+.wb-status[data-state="saving"] { --dot: #D8A31A; }
+.wb-status[data-state="dirty"] { --dot: #D8A31A; }
+.wb-status[data-state="offline"], .wb-status[data-state="error"] { --dot: var(--wb-red); color: var(--wb-red); }
+
+.wb-tray { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; padding: 6px; background: var(--wb-tray); color: var(--wb-tray-ink); border-radius: 12px; box-shadow: 0 14px 30px -16px rgba(30, 43, 70, .7); max-width: calc(100vw - 24px); overflow-x: auto; box-sizing: border-box; z-index: 4; }
+.wb-group { display: flex; gap: 2px; align-items: center; flex: none; }
+.wb-sep { width: 1px; height: 24px; background: rgba(230, 236, 245, .18); margin: 0 4px; flex: none; }
+.wb-btn { appearance: none; border: 0; background: transparent; color: inherit; font: 500 13px var(--wb-ui); display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.wb-btn:hover { background: rgba(230, 236, 245, .12); }
+.wb-btn[aria-pressed="true"] { background: var(--wb-tray-hi); color: var(--wb-ink); }
+.wb-btn:disabled { opacity: .35; cursor: default; background: transparent; }
+.wb-btn:focus-visible, .wb-swatch:focus-visible, .wb-select:focus-visible { outline: 2px solid #8FB6F0; outline-offset: 1px; }
+.wb-btn.wb-icon { padding: 7px; }
+.wb-ico { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.wb-select { appearance: none; background: rgba(230, 236, 245, .1); color: inherit; border: 1px solid rgba(230, 236, 245, .2); border-radius: 7px; font: 500 13px var(--wb-ui); padding: 6px 26px 6px 9px; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 13px center, right 8px center; background-size: 5px 5px; background-repeat: no-repeat; }
+.wb-select option { color: #1E2B46; }
+.wb-swatches { display: flex; gap: 5px; padding: 0 6px; }
+.wb-swatch { width: 18px; height: 18px; border-radius: 50%; border: 2px solid rgba(230, 236, 245, .3); cursor: pointer; padding: 0; }
+.wb-swatch[aria-pressed="true"] { border-color: #fff; box-shadow: 0 0 0 2px var(--wb-tray), 0 0 0 3.5px #fff; }
+.wb-swatch.c-none { background: linear-gradient(135deg, #fff 44%, var(--wb-red) 44% 56%, #fff 56%); }
+.wb-swatch.c-yellow { background: var(--wb-yellow); }
+.wb-swatch.c-green { background: var(--wb-mint); }
+.wb-swatch.c-blue { background: var(--wb-sky); }
+.wb-swatch.c-pink { background: var(--wb-rose); }
+.wb-swatch.c-gray { background: var(--wb-fog); }
+@media (max-width: 860px) { .wb-btn-label { display: none; } .wb-btn { padding: 7px; } }
+
+.wb-toast { position: fixed; left: 50%; bottom: 74px; transform: translate(-50%, 8px); background: var(--wb-ink); color: #fff; font-size: 13px; line-height: 1.4; padding: 8px 14px; border-radius: 8px; opacity: 0; pointer-events: none; transition: opacity .15s, transform .15s; max-width: min(560px, 90vw); text-align: center; z-index: 6; }
+.wb-toast.is-on { opacity: 1; transform: translate(-50%, 0); }
+
+.wb-label-editor { position: fixed; z-index: 7; transform: translate(-50%, -50%); }
+.wb-label-editor input { font: 600 14px var(--wb-font); color: var(--wb-ink); border: 2px solid var(--wb-blue); border-radius: 7px; padding: 6px 9px; min-width: 200px; outline: none; background: #fff; box-shadow: 0 8px 20px -10px rgba(30, 43, 70, .5); }
+
+.wb-help { position: fixed; right: 14px; top: 12px; bottom: 76px; width: min(340px, calc(100vw - 28px)); overflow: auto; background: #fff; border: 1px solid var(--wb-line); border-radius: 10px; padding: 16px 18px; box-sizing: border-box; box-shadow: 0 16px 40px -20px rgba(30, 43, 70, .5); z-index: 5; font-size: 13.5px; line-height: 1.45; }
+.wb-help h2 { font-size: 16px; margin: 0 0 10px; }
+.wb-help h3 { font-size: 13.5px; margin: 14px 0 6px; color: var(--wb-ink-soft); }
+.wb-help dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 12px; margin: 0; }
+.wb-help dt { font-weight: 600; }
+.wb-help dd { margin: 0; color: var(--wb-ink-soft); }
+.wb-help kbd { font: 600 11.5px var(--wb-ui); border: 1px solid var(--wb-line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--wb-canvas); }
+.wb-help .wb-close { position: absolute; right: 10px; top: 10px; color: var(--wb-ink); }
+.wb-help .wb-close:hover { background: var(--wb-fog); }
+
+
+/* =====================================================================
+   Minimal theme ("theme": "minimal" in board.json)
+   Same look as the diagram kit: warm grays, hairlines, two weights, flat.
+   ===================================================================== */
+:root[data-theme="minimal"] {
+  --wb-canvas: #f9f9f7;
+  --wb-grid: #dcdad3;
+  --wb-grid-major: #dcdad3;
+  --wb-ink: #0b0b0b;
+  --wb-ink-soft: #52514e;
+  --wb-line: rgba(11, 11, 11, 0.16);
+  --wb-blue: #2a78d6;
+  --wb-red: #A32D2D;
+  --wb-green: #0F6E56;
+  --wb-yellow: #FAEEDA;
+  --wb-mint: #E1F5EE;
+  --wb-sky: #E6F1FB;
+  --wb-rose: #FBEAF0;
+  --wb-fog: #F1EFE8;
+  --wb-tray: #ffffff;
+  --wb-tray-ink: #0b0b0b;
+  --wb-tray-hi: #f0efec;
+  --wb-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --wb-arrow: #52514e;
+}
+[data-theme="minimal"] .wb-stage { background-image: none, none, radial-gradient(circle at 1px 1px, var(--wb-grid) 1px, transparent 1.4px), none; }
+[data-theme="minimal"] .wb-stage.is-zoomed-out { background-image: none; }
+[data-theme="minimal"] .wb-txt { font-size: 14px; line-height: 1.5; }
+[data-theme="minimal"] .wb-txt b { font-weight: 500; }
+[data-theme="minimal"] .v-card { border: 0.5px solid var(--wb-line); border-radius: 8px; padding: 10px 14px; }
+[data-theme="minimal"] .v-note { border: 0.5px solid #EF9F27; border-radius: 8px; box-shadow: none; color: #633806; }
+[data-theme="minimal"] .v-title .wb-txt { font-size: 28px; font-weight: 500; letter-spacing: -0.01em; }
+[data-theme="minimal"] .v-heading .wb-txt { font-size: 18px; font-weight: 500; }
+[data-theme="minimal"] .v-bare .wb-txt { color: var(--wb-ink-soft); }
+/* colored cards: 50 fill, 600 hairline, 800 text */
+[data-theme="minimal"] :is(.v-card, .v-note).c-yellow { background: #FAEEDA; border-color: #854F0B; color: #633806; }
+[data-theme="minimal"] :is(.v-card, .v-note).c-green  { background: #E1F5EE; border-color: #0F6E56; color: #085041; }
+[data-theme="minimal"] :is(.v-card, .v-note).c-blue   { background: #E6F1FB; border-color: #185FA5; color: #0C447C; }
+[data-theme="minimal"] :is(.v-card, .v-note).c-pink   { background: #FBEAF0; border-color: #993556; color: #72243E; }
+[data-theme="minimal"] :is(.v-card, .v-note).c-gray   { background: #F1EFE8; border-color: #5F5E5A; color: #444441; }
+[data-theme="minimal"] :is(.v-title, .v-heading, .v-bare).c-blue { color: #185FA5; }
+[data-theme="minimal"] :is(.v-title, .v-heading, .v-bare).c-green { color: #0F6E56; }
+[data-theme="minimal"] :is(.v-title, .v-heading, .v-bare).c-pink { color: #993556; }
+[data-theme="minimal"] :is(.v-title, .v-heading, .v-bare).c-yellow .wb-txt { background: linear-gradient(transparent 58%, rgba(250, 178, 25, 0.33) 58%); }
+[data-theme="minimal"] .t-picture { border: 0.5px solid var(--wb-line); border-radius: 8px; padding: 8px; }
+[data-theme="minimal"] .wb-caption { font-size: 12px; }
+[data-theme="minimal"] .t-diagram { border: 0.5px solid rgba(11, 11, 11, 0.22); border-radius: 12px; }
+[data-theme="minimal"] .wb-dhead { background: #fff; border-bottom: 0.5px solid var(--wb-line); border-radius: 11px 11px 0 0; font-weight: 500; font-size: 12px; color: var(--wb-ink-soft); height: 30px; padding: 0 14px; }
+[data-theme="minimal"] .wb-dbody { border-radius: 0 0 11px 11px; }
+[data-theme="minimal"] .wb-stroke { stroke: var(--wb-arrow); stroke-width: 1.5; }
+[data-theme="minimal"] .wb-head { fill: none; stroke: var(--wb-arrow); stroke-width: 1.5; stroke-linecap: round; }
+[data-theme="minimal"] .wb-stroke-outer { stroke: var(--wb-arrow); stroke-width: 5.5; }
+[data-theme="minimal"] .wb-stroke-inner { stroke: var(--wb-canvas); stroke-width: 2.5; }
+[data-theme="minimal"] .wb-head-open { stroke: var(--wb-arrow); stroke-width: 1.5; }
+[data-theme="minimal"] .wb-arrow.is-selected .wb-head { fill: none; }
+[data-theme="minimal"] .wb-link-label { font-weight: 400; font-size: 12px; fill: var(--wb-ink-soft); }
+[data-theme="minimal"] .wb-brace-path { stroke: var(--wb-arrow); stroke-width: 1.5; }
+[data-theme="minimal"] .wb-brace-label { font-weight: 500; font-size: 13px; fill: var(--wb-ink); }
+[data-theme="minimal"] .wb-board-title { font-weight: 500; border-width: 0.5px; }
+[data-theme="minimal"] .wb-tray { border: 0.5px solid var(--wb-line); box-shadow: 0 8px 24px -14px rgba(11, 11, 11, 0.25); }
+[data-theme="minimal"] .wb-btn:hover { background: var(--wb-tray-hi); }
+[data-theme="minimal"] .wb-sep { background: var(--wb-line); }
+[data-theme="minimal"] .wb-select { background-color: transparent; border-color: var(--wb-line); }
+[data-theme="minimal"] .wb-swatch { border-color: var(--wb-line); }
+[data-theme="minimal"] .wb-swatch[aria-pressed="true"] { border-color: var(--wb-ink); box-shadow: none; }
+[data-theme="minimal"] .wb-swatch.c-yellow { background: #FAEEDA; }
+[data-theme="minimal"] .wb-swatch.c-green { background: #E1F5EE; }
+[data-theme="minimal"] .wb-swatch.c-blue { background: #E6F1FB; }
+[data-theme="minimal"] .wb-swatch.c-pink { background: #FBEAF0; }
+[data-theme="minimal"] .wb-swatch.c-gray { background: #F1EFE8; }
+
+@media (prefers-reduced-motion: reduce) { .wb-toast { transition: none; } }
+@media print { .wb-tray, .wb-top, .wb-toast, .wb-help { display: none !important; } }
+
+</style>
+</head>
+<body>
+<div id="wb-root"></div>
+<script id="wb-data" type="application/json">{"board":{"title":"Assembly stack frames","version":1,"theme":"minimal","elements":[{"id":"title","type":"text","x":40,"y":40,"w":600,"variant":"title","text":"Assembly stack frames"},{"id":"summary","type":"text","x":40,"y":90,"w":800,"variant":"bare","text":"x86-64 register names"},{"id":"h-memory","type":"text","x":40,"y":160,"w":360,"variant":"heading","text":"1. Where things live in memory"},{"id":"sketch-memory","type":"picture","x":40,"y":210,"w":340,"h":420,"src":"assets/memory-layout.svg","caption":"Memory layout"},{"id":"stack-seg","type":"text","x":440,"y":220,"w":100,"text":"**Stack**"},{"id":"stack-holds","type":"text","x":600,"y":220,"w":200,"text":"function data"},{"id":"grows-down","type":"text","x":900,"y":220,"w":200,"color":"blue","text":"grows ↓ (subtraction)"},{"id":"between","type":"text","x":440,"y":410,"w":100,"color":"gray","text":"heap · data"},{"id":"data-holds","type":"text","x":600,"y":410,"w":200,"color":"gray","text":"globals · statics"},{"id":"text-seg","type":"text","x":440,"y":540,"w":100,"text":"**Text**"},{"id":"text-holds","type":"text","x":600,"y":540,"w":200,"text":"instructions"},{"id":"stored-up","type":"text","x":900,"y":540,"w":180,"color":"blue","text":"stored ↑ (addition)"},{"id":"h-frames","type":"text","x":40,"y":700,"w":400,"variant":"heading","text":"2. Stack frames, rbp and rsp"},{"id":"sketch-frame","type":"picture","x":40,"y":750,"w":360,"h":400,"src":"assets/stack-frame.svg","caption":"Stack structure"},{"id":"frame","type":"text","x":460,"y":750,"w":180,"text":"**Stack frame**\n= 1 function call"},{"id":"locals","type":"text","x":710,"y":760,"w":200,"text":"local variables"},{"id":"rbp","type":"text","x":610,"y":880,"w":180,"color":"blue","text":"`rbp`\nbase pointer"},{"id":"frame-end","type":"text","x":860,"y":890,"w":210,"text":"address of frame base"},{"id":"rsp","type":"text","x":610,"y":1010,"w":180,"color":"blue","text":"`rsp`\nstack pointer"},{"id":"top","type":"text","x":860,"y":1020,"w":200,"text":"address of stack top"},{"id":"top-low","type":"text","x":1140,"y":1020,"w":270,"variant":"note","color":"pink","text":"lowest addr in use (irrelevant to frame)"},{"id":"alloc","type":"text","x":860,"y":1110,"w":250,"text":"`sub rsp, 16` → allocate space ↓\n`add rsp, 16` → free space ↑"},{"id":"a-stack","type":"arrow","from":"stack-seg","to":"stack-holds","style":"sequence","label":"holds"},{"id":"a-grows","type":"arrow","from":"stack-holds","to":"grows-down","style":"sequence"},{"id":"a-data","type":"arrow","from":"between","to":"data-holds","style":"sequence","label":"holds"},{"id":"a-text","type":"arrow","from":"text-seg","to":"text-holds","style":"sequence","label":"holds"},{"id":"a-stored","type":"arrow","from":"text-holds","to":"stored-up","style":"sequence"},{"id":"a-frame","type":"arrow","from":"frame","to":"locals","style":"sequence","label":"holds"},{"id":"a-rbp","type":"arrow","from":"rbp","to":"frame-end","style":"sequence","label":"holds"},{"id":"a-rsp","type":"arrow","from":"rsp","to":"top","style":"sequence","label":"holds"},{"id":"e-top","type":"arrow","from":"top","to":"top-low","style":"equivalence"},{"id":"a-alloc","type":"arrow","from":"rsp","to":"alloc","style":"sequence","label":"moves"},{"id":"b-pumx","type":"brace","members":["stack-seg","between","text-seg"],"side":"left"},{"id":"a-hp8z","type":"arrow","from":"frame","to":"rbp","style":"sequence","label":"defined by"},{"id":"b-6qw3","type":"brace","label":"held in CPU register","members":["rbp","rsp"],"side":"left"},{"id":"h-call","type":"text","x":40,"y":1260,"w":400,"variant":"heading","text":"3. Calling a function"},{"id":"c-call","type":"text","x":880,"y":1370,"w":200,"text":"`call f`\npush return addr → jump"},{"id":"c-push","type":"text","x":1180,"y":1370,"w":200,"text":"`push rbp`\nsave caller's rbp"},{"id":"c-mov","type":"text","x":1480,"y":1370,"w":200,"color":"blue","text":"`mov rbp, rsp`\nnew frame starts"},{"id":"c-sub","type":"text","x":1780,"y":1370,"w":200,"text":"`sub rsp, 16`\nallocate locals"},{"id":"d-val","type":"text","x":2080,"y":1550,"w":200,"text":"`mov eax, …`\nreturn value → `eax`"},{"id":"d-add","type":"text","x":1780,"y":1550,"w":200,"text":"`add rsp, 16`\nfree locals"},{"id":"d-pop","type":"text","x":1180,"y":1550,"w":200,"text":"`pop rbp`\nrestore caller's rbp"},{"id":"d-ret","type":"text","x":880,"y":1550,"w":200,"text":"`ret`\npop return addr, jump"},{"id":"b-create","type":"brace","label":"create frame","members":["c-call","c-push","c-mov","c-sub"],"side":"top"},{"id":"b-destroy","type":"brace","label":"destroy frame (reverse order)","members":["d-ret","d-pop","d-add","d-val"],"side":"bottom"},{"id":"a-c1","type":"arrow","from":"c-call","to":"c-push","style":"sequence"},{"id":"a-c2","type":"arrow","from":"c-push","to":"c-mov","style":"sequence"},{"id":"a-c3","type":"arrow","from":"c-mov","to":"c-sub","style":"sequence"},{"id":"a-body","type":"arrow","from":"c-sub","to":"d-val","style":"sequence","label":"body runs"},{"id":"a-d1","type":"arrow","from":"d-val","to":"d-add","style":"sequence"},{"id":"a-d2","type":"arrow","from":"d-add","to":"d-pop","style":"sequence"},{"id":"a-d3","type":"arrow","from":"d-pop","to":"d-ret","style":"sequence"},{"id":"u-sub","type":"arrow","from":"d-add","to":"c-sub","style":"sequence","label":"undoes"},{"id":"u-push","type":"arrow","from":"d-pop","to":"c-push","style":"sequence","label":"undoes"},{"id":"u-call","type":"arrow","from":"d-ret","to":"c-call","style":"sequence","label":"undoes"},{"id":"d-call","type":"diagram","x":40,"y":1340,"w":760,"h":480,"src":"diagrams/call-return.html","title":"Calling a function, step by step"},{"id":"n-mov","type":"text","x":880,"y":1730,"w":260,"variant":"note","color":"pink","text":"`push rbp` only saves the old rbp\n`mov rbp, rsp` starts the new frame"},{"id":"n-leave","type":"text","x":1180,"y":1730,"w":260,"variant":"note","text":"`leave` = `mov rsp, rbp` + `pop rbp`\n(what compilers usually emit)"},{"id":"pp-push","type":"text","x":1520,"y":1730,"w":220,"color":"blue","text":"**`push X`**"},{"id":"pp-pop","type":"text","x":1520,"y":1800,"w":220,"color":"blue","text":"**`pop X`**"},{"id":"pp-push-x","type":"text","x":1780,"y":1730,"w":220,"text":"copy X → stack top"},{"id":"pp-pop-x","type":"text","x":1780,"y":1800,"w":220,"text":"stack top → copy into X"},{"id":"b-ck1q","type":"brace","members":["pp-push","pp-pop"],"side":"left"},{"id":"a-i2zm","type":"arrow","from":"pp-push","to":"pp-push-x","style":"sequence"},{"id":"a-q56d","type":"arrow","from":"pp-pop","to":"pp-pop-x","style":"sequence"},{"id":"h-overflow","type":"text","x":40,"y":1920,"w":400,"variant":"heading","text":"4. Stack overflow"},{"id":"d-overflow","type":"diagram","x":40,"y":1980,"w":560,"h":400,"src":"diagrams/stack-overflow.html","title":"Stack overflow"},{"id":"so-recur","type":"text","x":680,"y":2000,"w":220,"text":"deep / infinite recursion"},{"id":"so-array","type":"text","x":680,"y":2100,"w":220,"text":"huge local arrays\n`char buf[1 MB]`"},{"id":"so-what","type":"text","x":1020,"y":2050,"w":240,"color":"blue","text":"**Stack overflow**\n`rsp` passes the stack limit ↓"},{"id":"so-crash","type":"text","x":1380,"y":2060,"w":220,"text":"segfault → program crashes"},{"id":"so-not-leak","type":"text","x":1240,"y":2160,"w":240,"variant":"note","color":"pink","text":"≠ memory leak\n(leak = heap memory never freed)"},{"id":"so-not-buf","type":"text","x":980,"y":2160,"w":240,"color":"gray","text":"≠ buffer overflow\n(writing past an array's end)"},{"id":"so-p-base","type":"text","x":680,"y":2340,"w":220,"text":"base case\nlimit recursion depth"},{"id":"so-p-loop","type":"text","x":960,"y":2340,"w":220,"text":"recursion → loop"},{"id":"so-p-heap","type":"text","x":1240,"y":2340,"w":220,"text":"big data → heap\n(`malloc`)"},{"id":"so-p-size","type":"text","x":1520,"y":2340,"w":220,"color":"gray","text":"bigger stack (`ulimit -s`)\nlast resort"},{"id":"b-so-cause","type":"brace","members":["so-recur","so-array"],"side":"right"},{"id":"b-so-prevent","type":"brace","label":"prevent","members":["so-p-base","so-p-loop","so-p-heap","so-p-size"],"side":"top"},{"id":"a-so-cause","type":"arrow","from":"b-so-cause","to":"so-what","style":"sequence","label":"causes"},{"id":"a-so-crash","type":"arrow","from":"so-what","to":"so-crash","style":"sequence","label":"result"},{"id":"b-uzyv","type":"brace","members":["so-not-leak","so-not-buf"],"side":"top"}]},"assets":{"assets/memory-layout.svg":"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzNDAgMzk2IiBmb250LWZhbWlseT0idWktc2Fucy1zZXJpZiwgc3lzdGVtLXVpLCAtYXBwbGUtc3lzdGVtLCAnU2Vnb2UgVUknLCBSb2JvdG8sICdIZWx2ZXRpY2EgTmV1ZScsIHNhbnMtc2VyaWYiPgogIDwhLS0gUm91Z2ggc2tldGNoIGRyYXduIGJ5IENsYXVkZTogYSBwcm9jZXNzJ3MgbWVtb3J5LCBoaWdoIGFkZHJlc3NlcyBhdCB0aGUgdG9wLiBEaWFncmFtIGtpdCBwYWxldHRlIGFuZCB0eXBlLiAtLT4KICA8ZGVmcz4KICAgIDxtYXJrZXIgaWQ9ImRrLWFycm93IiB2aWV3Qm94PSIwIDAgMTAgMTAiIHJlZlg9IjgiIHJlZlk9IjUiIG1hcmtlcldpZHRoPSI3IiBtYXJrZXJIZWlnaHQ9IjciIG9yaWVudD0iYXV0by1zdGFydC1yZXZlcnNlIj4KICAgICAgPHBhdGggZD0iTTIgMUw4IDVMMiA5IiBmaWxsPSJub25lIiBzdHJva2U9IiM1MjUxNGUiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICAgIDwvbWFya2VyPgogIDwvZGVmcz4KICA8cmVjdCB4PSIwIiB5PSIwIiB3aWR0aD0iMzQwIiBoZWlnaHQ9IjM5NiIgZmlsbD0iI2ZmZmZmZiIvPgoKICA8IS0tIGFkZHJlc3MgYXhpcyAtLT4KICA8dGV4dCB4PSI0MCIgeT0iMTYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5oaWdoPC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIzMCIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzg5ODc4MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmFkZHJlc3M8L3RleHQ+CiAgPGxpbmUgeDE9IjQwIiB5MT0iMzUyIiB4Mj0iNDAiIHkyPSI0NCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNTI1MTRlIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBtYXJrZXItZW5kPSJ1cmwoI2RrLWFycm93KSIvPgogIDx0ZXh0IHg9IjQwIiB5PSIzNjYiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5sb3c8L3RleHQ+CiAgPHRleHQgeD0iNDAiIHk9IjM4MCIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzg5ODc4MSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmFkZHJlc3M8L3RleHQ+CgogIDwhLS0gc3RhY2sgLS0+CiAgPHJlY3QgeD0iODAiIHk9IjE0IiB3aWR0aD0iMTYwIiBoZWlnaHQ9Ijg2IiByeD0iNCIgZmlsbD0iI0UxRjVFRSIgc3Ryb2tlPSIjMEY2RTU2IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iNDciIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSI1MDAiIGZpbGw9IiMwODUwNDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5TdGFjazwvdGV4dD4KICA8dGV4dCB4PSIxNjAiIHk9IjY3IiBmb250LXNpemU9IjEyIiBmaWxsPSIjMEY2RTU2IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+ZnVuY3Rpb24gZGF0YTwvdGV4dD4KICA8bGluZSB4MT0iMjYyIiB5MT0iMzQiIHgyPSIyNjIiIHkyPSIxMTIiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzUyNTE0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgbWFya2VyLWVuZD0idXJsKCNkay1hcnJvdykiLz4KICA8dGV4dCB4PSIyNzIiIHk9IjY2IiBmb250LXNpemU9IjEyIiBmaWxsPSIjNTI1MTRlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+Z3Jvd3M8L3RleHQ+CiAgPHRleHQgeD0iMjcyIiB5PSI4MiIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzUyNTE0ZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmRvd248L3RleHQ+CgogIDwhLS0gZnJlZSBzcGFjZSAtLT4KICA8cmVjdCB4PSI4MCIgeT0iMTA0IiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEyMiIgcng9IjQiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzg5ODc4MSIgc3Ryb2tlLXdpZHRoPSIwLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjMgMyIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMTY1IiBmb250LXNpemU9IjExIiBmaWxsPSIjODk4NzgxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+dW51c2VkIHNwYWNlPC90ZXh0PgoKICA8IS0tIGhlYXAgYW5kIGRhdGEgLS0+CiAgPHJlY3QgeD0iODAiIHk9IjIzMCIgd2lkdGg9IjE2MCIgaGVpZ2h0PSIzNiIgcng9IjQiIGZpbGw9IiNGMUVGRTgiIHN0cm9rZT0iIzVGNUU1QSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8dGV4dCB4PSIxNjAiIHk9IjI0OCIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzVGNUU1QSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmhlYXAgKGdyb3dzIHVwKTwvdGV4dD4KICA8cmVjdCB4PSI4MCIgeT0iMjcwIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjM2IiByeD0iNCIgZmlsbD0iI0YxRUZFOCIgc3Ryb2tlPSIjNUY1RTVBIiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMjg4IiBmb250LXNpemU9IjEyIiBmaWxsPSIjNUY1RTVBIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+ZGF0YTogZ2xvYmFscywgc3RhdGljczwvdGV4dD4KCiAgPCEtLSB0ZXh0IC8gY29kZSAtLT4KICA8cmVjdCB4PSI4MCIgeT0iMzEwIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjcyIiByeD0iNCIgZmlsbD0iI0VFRURGRSIgc3Ryb2tlPSIjNTM0QUI3IiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDx0ZXh0IHg9IjE2MCIgeT0iMzM2IiBmb250LXNpemU9IjE0IiBmb250LXdlaWdodD0iNTAwIiBmaWxsPSIjM0MzNDg5IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+VGV4dDwvdGV4dD4KICA8dGV4dCB4PSIxNjAiIHk9IjM1NiIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzUzNEFCNyIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmluc3RydWN0aW9ucyAoY29kZSk8L3RleHQ+CiAgPGxpbmUgeDE9IjI2MiIgeTE9IjM3OCIgeDI9IjI2MiIgeTI9IjMxNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNTI1MTRlIiBzdHJva2Utd2lkdGg9IjEuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBtYXJrZXItZW5kPSJ1cmwoI2RrLWFycm93KSIvPgogIDx0ZXh0IHg9IjI3MiIgeT0iMzM4IiBmb250LXNpemU9IjEyIiBmaWxsPSIjNTI1MTRlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+c3RvcmVkPC90ZXh0PgogIDx0ZXh0IHg9IjI3MiIgeT0iMzU0IiBmb250LXNpemU9IjEyIiBmaWxsPSIjNTI1MTRlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+dXB3YXJkPC90ZXh0Pgo8L3N2Zz4K","assets/stack-frame.svg":"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzNjAgMzc2IiBmb250LWZhbWlseT0idWktc2Fucy1zZXJpZiwgc3lzdGVtLXVpLCAtYXBwbGUtc3lzdGVtLCAnU2Vnb2UgVUknLCBSb2JvdG8sICdIZWx2ZXRpY2EgTmV1ZScsIHNhbnMtc2VyaWYiPgogIDwhLS0gUm91Z2ggc2tldGNoIGRyYXduIGJ5IENsYXVkZTogc3RydWN0dXJlIG9mIHRoZSBzdGFjaywgdGhlIGN1cnJlbnQgZnJhbWUgYW5kIGl0cyB0d28gcG9pbnRlcnMuIERpYWdyYW0ga2l0IHBhbGV0dGUgYW5kIHR5cGUuIC0tPgogIDxkZWZzPgogICAgPG1hcmtlciBpZD0iZGstYXJyb3ciIHZpZXdCb3g9IjAgMCAxMCAxMCIgcmVmWD0iOCIgcmVmWT0iNSIgbWFya2VyV2lkdGg9IjciIG1hcmtlckhlaWdodD0iNyIgb3JpZW50PSJhdXRvLXN0YXJ0LXJldmVyc2UiPgogICAgICA8cGF0aCBkPSJNMiAxTDggNUwyIDkiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzUyNTE0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogICAgPC9tYXJrZXI+CiAgPC9kZWZzPgogIDxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSIzNjAiIGhlaWdodD0iMzc2IiBmaWxsPSIjZmZmZmZmIi8+CgogIDwhLS0gYWRkcmVzcyBkaXJlY3Rpb24gLS0+CiAgPHRleHQgeD0iNDAiIHk9IjE2IiBmb250LXNpemU9IjExIiBmaWxsPSIjODk4NzgxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+aGlnaDwvdGV4dD4KICA8dGV4dCB4PSI0MCIgeT0iMzAiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5hZGRyPC90ZXh0PgogIDxsaW5lIHgxPSI0MCIgeTE9IjQ0IiB4Mj0iNDAiIHkyPSIzMjYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzUyNTE0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgbWFya2VyLWVuZD0idXJsKCNkay1hcnJvdykiLz4KICA8dGV4dCB4PSI0MCIgeT0iMzQ0IiBmb250LXNpemU9IjExIiBmaWxsPSIjODk4NzgxIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+bG93PC90ZXh0PgogIDx0ZXh0IHg9IjQwIiB5PSIzNTgiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5hZGRyPC90ZXh0PgogIDx0ZXh0IHg9IjUwIiB5PSIxODYiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiM1MjUxNGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5ncm93czwvdGV4dD4KCiAgPCEtLSBlYXJsaWVyIGZyYW1lcyAoY2FsbGVycykgLS0+CiAgPHJlY3QgeD0iMTAwIiB5PSIyMCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSI3OCIgcng9IjQiIGZpbGw9IiNGMUVGRTgiIHN0cm9rZT0iIzVGNUU1QSIgc3Ryb2tlLXdpZHRoPSIwLjUiLz4KICA8dGV4dCB4PSIxNzUiIHk9IjU5IiBmb250LXNpemU9IjEyIiBmaWxsPSIjNUY1RTVBIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0iY2VudHJhbCI+Y2FsbGVyJ3MgZnJhbWU8L3RleHQ+CgogIDwhLS0gY3VycmVudCBmcmFtZSAtLT4KICA8cmVjdCB4PSIxMDAiIHk9IjEwMCIgd2lkdGg9IjE1MCIgaGVpZ2h0PSIxNjAiIHJ4PSI0IiBmaWxsPSIjRTFGNUVFIiBzdHJva2U9IiMwRjZFNTYiIHN0cm9rZS13aWR0aD0iMS41Ii8+CiAgPHRleHQgeD0iMTc1IiB5PSIxNzEiIGZvbnQtc2l6ZT0iMTQiIGZvbnQtd2VpZ2h0PSI1MDAiIGZpbGw9IiMwODUwNDEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5zdGFjayBmcmFtZTwvdGV4dD4KICA8dGV4dCB4PSIxNzUiIHk9IjE5MCIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzBGNkU1NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPmN1cnJlbnQgZnVuY3Rpb248L3RleHQ+CgogIDwhLS0gdW51c2VkIHNwYWNlIGJlbG93IHRoZSB0b3Agb2YgdGhlIHN0YWNrIC0tPgogIDxyZWN0IHg9IjEwMCIgeT0iMjYyIiB3aWR0aD0iMTUwIiBoZWlnaHQ9IjkwIiByeD0iNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjODk4NzgxIiBzdHJva2Utd2lkdGg9IjAuNSIgc3Ryb2tlLWRhc2hhcnJheT0iMyAzIi8+CiAgPHRleHQgeD0iMTc1IiB5PSIzMDciIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj51bnVzZWQ8L3RleHQ+CgogIDwhLS0gYmFzZSBwb2ludGVyOiBmaXhlZCwgaGlnaCBlbmQgb2YgdGhlIGZyYW1lIC0tPgogIDxsaW5lIHgxPSIzMDAiIHkxPSIxMDAiIHgyPSIyNTYiIHkyPSIxMDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzUyNTE0ZSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgbWFya2VyLWVuZD0idXJsKCNkay1hcnJvdykiLz4KICA8dGV4dCB4PSIzMDYiIHk9Ijk0IiBmb250LWZhbWlseT0idWktbW9ub3NwYWNlLCBTRk1vbm8tUmVndWxhciwgTWVubG8sIENvbnNvbGFzLCBtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiMwYjBiMGIiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5yYnA8L3RleHQ+CiAgPHRleHQgeD0iMzA2IiB5PSIxMTAiIGZvbnQtc2l6ZT0iMTEiIGZpbGw9IiM4OTg3ODEiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIj5iYXNlPC90ZXh0PgoKICA8IS0tIHN0YWNrIHBvaW50ZXI6IGxvdyBlbmQgb2YgdGhlIGZyYW1lID0gdG9wIG9mIHRoZSBzdGFjayAtLT4KICA8bGluZSB4MT0iMzAwIiB5MT0iMjYwIiB4Mj0iMjU2IiB5Mj0iMjYwIiBmaWxsPSJub25lIiBzdHJva2U9IiM1MjUxNGUiIHN0cm9rZS13aWR0aD0iMS41IiBzdHJva2UtbGluZWNhcD0icm91bmQiIG1hcmtlci1lbmQ9InVybCgjZGstYXJyb3cpIi8+CiAgPHRleHQgeD0iMzA2IiB5PSIyNTQiIGZvbnQtZmFtaWx5PSJ1aS1tb25vc3BhY2UsIFNGTW9uby1SZWd1bGFyLCBNZW5sbywgQ29uc29sYXMsIG1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzBiMGIwYiIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPnJzcDwvdGV4dD4KICA8dGV4dCB4PSIzMDYiIHk9IjI3MCIgZm9udC1zaXplPSIxMSIgZmlsbD0iIzg5ODc4MSIgZG9taW5hbnQtYmFzZWxpbmU9ImNlbnRyYWwiPnRvcDwvdGV4dD4KPC9zdmc+Cg=="},"diagrams":{"diagrams/call-return.html":"\u003c!doctype html>\n\u003chtml lang=\"en\">\n\u003chead>\n\u003cmeta charset=\"utf-8\">\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\u003ctitle>Calling a function, step by step\u003c/title>\n\u003cstyle>\n/*\n * Diagram kit: the shared look for every interactive diagram on a board.\n * Flat white surface, hairline chrome in warm grays, two font weights,\n * sentence case, color only where it carries meaning.\n * Diagrams link this file and diagram-kit.js with relative paths\n * (../../../engine/...); see engine/DIAGRAM_STYLE.md. The export script\n * inlines both, so exported boards still work offline.\n */\n:root {\n  /* surfaces and ink */\n  --surface: #ffffff;\n  --surface-1: #fcfcfb;\n  --surface-2: #f5f4f0;\n  --text-primary: #0b0b0b;\n  --text-secondary: #52514e;\n  --text-muted: #898781;\n  --grid: #ecebe5;\n  --axis: #c3c2b7;\n  --border: rgba(11, 11, 11, 0.10);\n  --border-strong: rgba(11, 11, 11, 0.20);\n  --accent: #2a78d6;\n  --highlight: rgba(250, 178, 25, 0.33);\n\n  /* series colors: always assign in this order, never cycle */\n  --series-1: #2a78d6;   /* blue */\n  --series-2: #eb6834;   /* orange */\n  --series-3: #1baf7a;   /* aqua */\n  --series-4: #eda100;   /* yellow */\n  --series-5: #e87ba4;   /* magenta */\n  --series-6: #008300;   /* green */\n  --series-7: #6250d6;   /* violet */\n  --series-8: #e34948;   /* red */\n  --context: #c3c2b7;    /* de-emphasized series */\n\n  --font: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif;\n  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  --radius: 8px;\n}\n\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--surface); color: var(--text-primary); }\nbody {\n  font: 400 14px/1.5 var(--font);\n  padding: 14px 18px 12px;\n  min-height: 100vh;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  -webkit-font-smoothing: antialiased;\n}\nb, strong, h1, h2, h3, th { font-weight: 500; }\ncode, .mono { font-family: var(--mono); font-size: 0.92em; }\n.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }\n\n/* ---------- layout ---------- */\n.dk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }\n.dk-fill { flex: 1; min-height: 0; position: relative; display: flex; }\n.dk-fill > svg { flex: 1; width: 100%; height: 100%; display: block; }\n.dk-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; flex: 1; min-height: 0; }\n\n/* ---------- text ---------- */\n.dk-caption { font-size: 12px; color: var(--text-muted); }\n.dk-readout { font-size: 14px; color: var(--text-secondary); min-height: 1.5em; }\n.dk-readout b { color: var(--text-primary); }\n.dk-value { font-weight: 500; color: var(--text-primary); font-variant-numeric: tabular-nums; }\n.dk-mark { background: linear-gradient(transparent 55%, var(--highlight) 55%); }\n\n/* ---------- controls ---------- */\n.dk-control { display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-secondary); }\n.dk-control output { min-width: 3.2em; color: var(--text-primary); font-weight: 500; font-variant-numeric: tabular-nums; }\ninput[type=range] { appearance: none; -webkit-appearance: none; width: 140px; height: 18px; background: transparent; margin: 0; cursor: pointer; }\ninput[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--text-primary) var(--p, 0%), var(--grid) var(--p, 0%)); }\ninput[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--grid); }\ninput[type=range]::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--text-primary); }\ninput[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; background: var(--surface); border: 1.5px solid var(--text-primary); }\ninput[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--surface); border: 1.5px solid var(--text-primary); }\n\nbutton, .dk-btn {\n  font: 400 13px var(--font); color: var(--text-primary); background: transparent;\n  border: 0.5px solid var(--border-strong); border-radius: var(--radius); padding: 5px 12px; cursor: pointer;\n}\nbutton:hover { background: var(--surface-2); }\nbutton:active { transform: scale(0.98); }\nbutton:disabled { color: var(--text-muted); cursor: default; background: transparent; transform: none; }\n:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }\n\n.dk-seg { display: inline-flex; border: 0.5px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }\n.dk-seg button { border: 0; border-radius: 0; padding: 5px 11px; }\n.dk-seg button + button { border-left: 0.5px solid var(--border-strong); }\n.dk-seg button[aria-pressed=\"true\"] { background: var(--text-primary); color: var(--surface); }\n\n.dk-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }\n.dk-toggle input { appearance: none; -webkit-appearance: none; width: 30px; height: 18px; border-radius: 9px; background: var(--axis); position: relative; cursor: pointer; margin: 0; transition: background .15s; }\n.dk-toggle input::after { content: \"\"; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }\n.dk-toggle input:checked { background: var(--text-primary); }\n.dk-toggle input:checked::after { transform: translateX(12px); }\n\n/* ---------- legend ---------- */\n.dk-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--text-secondary); }\n.dk-legend span { display: inline-flex; align-items: center; gap: 6px; }\n.dk-key-line { width: 14px; height: 0; border-top: 2px solid currentColor; border-radius: 1px; }\n.dk-key-dash { width: 14px; height: 0; border-top: 2px dashed currentColor; }\n.dk-key-box { width: 10px; height: 10px; border-radius: 2px; background: currentColor; }\n\n/* ---------- step-through ---------- */\n.dk-steps { display: flex; align-items: center; gap: 12px; }\n.dk-dots { display: flex; gap: 6px; }\n.dk-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--axis); }\n.dk-dots i.on { background: var(--text-primary); }\n.dk-steps .dk-count { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }\n\n/* ---------- SVG text and marks ---------- */\nsvg text { font-family: var(--font); }\n.t  { font-size: 14px; fill: var(--text-primary); }\n.th { font-size: 14px; font-weight: 500; fill: var(--text-primary); }\n.ts { font-size: 12px; fill: var(--text-secondary); }\n.tm { font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }\n.tmono { font-family: var(--mono); font-size: 12px; fill: var(--text-primary); }\n.dk-grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }\n.dk-axis { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }\n.dk-zero { stroke: var(--axis); stroke-width: 1; }\n.dk-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }\n.dk-area { stroke: none; opacity: 0.10; }\n.dk-dot { stroke: var(--surface); stroke-width: 2; }\n.dk-guide { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; fill: none; }\n.dk-crosshair { stroke: var(--text-muted); stroke-width: 1; shape-rendering: crispEdges; }\n.box { fill: var(--surface-1); stroke: var(--border-strong); stroke-width: 0.5; }\n.arr { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }\n.leader { fill: none; stroke: var(--text-muted); stroke-width: 0.5; stroke-dasharray: 3 3; }\n\n/* Color ramps for boxes and regions: 50 fill, 600 stroke, 800 title, 600 subtitle.\n   Use on \u003crect>/\u003ccircle>/\u003cg>. Pick 2-3 per diagram; gray for neutral structure. */\n.c-gray   { --c50:#F1EFE8; --c200:#B4B2A9; --c600:#5F5E5A; --c800:#444441; }\n.c-blue   { --c50:#E6F1FB; --c200:#85B7EB; --c600:#185FA5; --c800:#0C447C; }\n.c-teal   { --c50:#E1F5EE; --c200:#5DCAA5; --c600:#0F6E56; --c800:#085041; }\n.c-purple { --c50:#EEEDFE; --c200:#AFA9EC; --c600:#534AB7; --c800:#3C3489; }\n.c-coral  { --c50:#FAECE7; --c200:#F0997B; --c600:#993C1D; --c800:#712B13; }\n.c-pink   { --c50:#FBEAF0; --c200:#ED93B1; --c600:#993556; --c800:#72243E; }\n.c-green  { --c50:#EAF3DE; --c200:#97C459; --c600:#3B6D11; --c800:#27500A; }\n.c-amber  { --c50:#FAEEDA; --c200:#EF9F27; --c600:#854F0B; --c800:#633806; }\n.c-red    { --c50:#FCEBEB; --c200:#F09595; --c600:#A32D2D; --c800:#791F1F; }\n:is(rect, circle, ellipse, polygon):is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red),\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > :is(rect, circle, ellipse, polygon) {\n  fill: var(--c50); stroke: var(--c600); stroke-width: 0.5;\n}\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .th,\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .t { fill: var(--c800); }\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .ts,\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .tmono { fill: var(--c600); }\n.is-active > :is(rect, circle) { stroke-width: 1.5; }\n.c-chip { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; background: var(--c50); color: var(--c800); }\n\n/* ---------- tooltip ---------- */\n.dk-tip {\n  position: absolute; pointer-events: none; z-index: 2;\n  background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: var(--radius);\n  padding: 6px 10px; font-size: 12px; color: var(--text-secondary); white-space: nowrap;\n  box-shadow: 0 4px 14px -6px rgba(11, 11, 11, 0.18);\n}\n.dk-tip .dk-tip-head { color: var(--text-muted); margin-bottom: 2px; font-variant-numeric: tabular-nums; }\n.dk-tip .dk-tip-row { display: flex; align-items: center; gap: 8px; }\n.dk-tip .dk-tip-row .dk-value { margin-left: auto; padding-left: 12px; }\n\n/* ---------- motion ---------- */\n.dk-anim { transition: transform .25s ease, opacity .25s ease; }\n@media (prefers-reduced-motion: reduce) { .dk-anim, .dk-toggle input, .dk-toggle input::after { transition: none; } }\n\n\u003c/style>\n\u003cstyle>\n  .code { list-style: none; margin: 0; padding: 0; font: 12.5px/18px var(--mono); counter-reset: ln; }\n  .code li { display: flex; gap: 12px; padding: 0 8px; border-radius: 4px; color: var(--text-secondary); white-space: pre; }\n  .code li::before { counter-increment: ln; content: counter(ln); color: var(--text-muted); width: 1.4em; text-align: right; flex: none; }\n  .code li.label { color: var(--text-primary); font-weight: 500; }\n  .code li .c { color: var(--text-muted); }\n  .code li.on { background: #FAEEDA; color: #633806; }\n  .code li.on .c { color: #854F0B; }\n  .code li.target { box-shadow: inset 0 0 0 0.5px #854F0B; }\n  .regs { display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); margin-top: 12px; }\n  .regs b { font: 500 12px var(--mono); color: var(--text-primary); }\n  .regs .changed b { background: linear-gradient(transparent 55%, var(--highlight) 55%); }\n  .phase { font-size: 12px; color: var(--text-muted); }\n  #stack { width: 100%; height: 100%; }\n  .stale > rect { fill: var(--surface); stroke: var(--axis); stroke-width: 0.75; stroke-dasharray: 4 3; }\n  .stale > text { fill: var(--text-muted); }\n\u003c/style>\n\u003c/head>\n\u003cbody>\n\u003ch2 class=\"sr-only\">Step through calling and returning from a function in x86-64: call, push rbp, mov rbp rsp and sub rsp build the frame; the return value goes to eax, then add rsp, pop rbp and ret tear it down.\u003c/h2>\n\u003cdiv class=\"dk-split\" style=\"grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr)\">\n  \u003cdiv>\n    \u003col class=\"code\" id=\"code\">\u003c/ol>\n    \u003cdiv class=\"regs\" id=\"regs\">\u003c/div>\n  \u003c/div>\n  \u003cdiv class=\"dk-fill\">\u003csvg id=\"stack\" viewBox=\"0 0 340 310\" preserveAspectRatio=\"xMidYMin meet\" role=\"img\" aria-label=\"Stack memory\">\u003c/svg>\u003c/div>\n\u003c/div>\n\u003cdiv class=\"dk-readout\" id=\"caption\">\u003c/div>\n\u003cdiv class=\"dk-row\" style=\"justify-content: space-between\">\n  \u003cdiv id=\"nav\">\u003c/div>\n  \u003cdiv class=\"dk-caption\">Illustrative, gcc -O0 style, simplified.\u003c/div>\n\u003c/div>\n\n\u003cscript>\n/*\n * Diagram kit helpers. No dependencies; everything draws plain SVG in the\n * shared style from diagram-kit.css. The main pieces:\n *\n *   DK.plot(el, opts)        function / data plot with axes, crosshair and tooltip\n *   DK.slider(parent, opts)  labelled range slider with a live value\n *   DK.segmented(parent, o)  pick-one buttons\n *   DK.toggle(parent, opts)  on/off switch\n *   DK.legend(parent, items) line / box keys (use for 2+ series)\n *   DK.stepper(parent, o)    Back / Next with dots, for step-through diagrams\n *   DK.svg(tag, attrs, parent), DK.h(tag, attrs, ...kids), DK.fmt(n), DK.color(i)\n *\n * See engine/DIAGRAM_STYLE.md for when to use each and the rules they follow.\n */\n(function () {\n  'use strict';\n  const NS = 'http://www.w3.org/2000/svg';\n  const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];\n  const INK = { primary: '#0b0b0b', secondary: '#52514e', muted: '#898781', grid: '#ecebe5', axis: '#c3c2b7', surface: '#ffffff', context: '#c3c2b7' };\n\n  function svg(tag, attrs, parent) {\n    const n = document.createElementNS(NS, tag);\n    for (const k in attrs || {}) {\n      const v = attrs[k];\n      if (v == null || v === false) continue;\n      if (k === 'text') n.textContent = v;\n      else n.setAttribute(k, v);\n    }\n    if (parent) parent.append(n);\n    return n;\n  }\n\n  function h(tag, attrs, ...kids) {\n    const n = document.createElement(tag);\n    for (const k in attrs || {}) {\n      const v = attrs[k];\n      if (v == null || v === false) continue;\n      if (k === 'text') n.textContent = v;\n      else if (k === 'class') n.className = v;\n      else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);\n      else n.setAttribute(k, v === true ? '' : v);\n    }\n    for (const kid of kids) if (kid != null) n.append(kid);\n    return n;\n  }\n\n  /** Series color by slot (1-based, fixed order). Pass 0 or 'context' for the gray de-emphasis color. */\n  function color(i) {\n    if (!i || i === 'context') return INK.context;\n    return SERIES[(i - 1) % SERIES.length];\n  }\n\n  /** Round for display. Uses a real minus sign, trims trailing zeros. */\n  function fmt(v, digits) {\n    if (v == null || !isFinite(v)) return '–';\n    if (digits == null) {\n      const a = Math.abs(v);\n      digits = a === 0 ? 0 : a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 2 : 3;\n    }\n    let s = (+v.toFixed(digits)).toLocaleString('en-US', { maximumFractionDigits: digits });\n    if (s === '-0') s = '0';\n    return s.replace(/^-/, '−');\n  }\n\n  function niceStep(span, count) {\n    const raw = span / Math.max(1, count);\n    const p = Math.pow(10, Math.floor(Math.log10(raw)));\n    const m = raw / p;\n    return (m \u003c 1.5 ? 1 : m \u003c 3 ? 2 : m \u003c 7 ? 5 : 10) * p;\n  }\n  function ticks(min, max, count) {\n    const step = niceStep(max - min, count);\n    const out = [];\n    for (let v = Math.ceil(min / step) * step; v \u003c= max + step * 1e-9; v += step) out.push(Math.abs(v) \u003c step * 1e-9 ? 0 : v);\n    return { values: out, step };\n  }\n  function tickDigits(step) { return step >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(step) - 1e-9)); }\n\n  /* ---------------- controls ---------------- */\n\n  function slider(parent, o) {\n    const out = h('output');\n    const input = h('input', { type: 'range', min: o.min, max: o.max, step: o.step ?? 'any', value: o.value, 'aria-label': o.label });\n    const show = () => {\n      out.textContent = o.format ? o.format(+input.value) : fmt(+input.value);\n      input.style.setProperty('--p', ((+input.value - o.min) / (o.max - o.min) * 100) + '%');\n    };\n    input.addEventListener('input', () => { show(); o.onInput && o.onInput(+input.value); });\n    show();\n    const wrap = h('label', { class: 'dk-control' }, o.label ? h('span', { text: o.label }) : null, input, out);\n    if (o.width) input.style.width = o.width + 'px';\n    parent.append(wrap);\n    return {\n      el: wrap, input,\n      get value() { return +input.value; },\n      set(v, silent) { input.value = v; show(); if (!silent && o.onInput) o.onInput(+input.value); },\n    };\n  }\n\n  function segmented(parent, o) {\n    let value = o.value ?? o.options[0][0];\n    const wrap = h('div', { class: 'dk-control' });\n    if (o.label) wrap.append(h('span', { text: o.label }));\n    const seg = h('div', { class: 'dk-seg', role: 'group', 'aria-label': o.label || 'Options' });\n    const buttons = o.options.map(([v, label]) => {\n      const b = h('button', { type: 'button', text: label, 'aria-pressed': String(v === value) });\n      b.addEventListener('click', () => api.set(v));\n      seg.append(b);\n      return [v, b];\n    });\n    wrap.append(seg);\n    parent.append(wrap);\n    const api = {\n      el: wrap,\n      get value() { return value; },\n      set(v) { value = v; for (const [bv, b] of buttons) b.setAttribute('aria-pressed', String(bv === v)); o.onChange && o.onChange(v); },\n    };\n    return api;\n  }\n\n  function toggle(parent, o) {\n    const input = h('input', { type: 'checkbox', role: 'switch' });\n    input.checked = !!o.checked;\n    input.addEventListener('change', () => o.onChange && o.onChange(input.checked));\n    const wrap = h('label', { class: 'dk-toggle' }, input, h('span', { text: o.label }));\n    parent.append(wrap);\n    return { el: wrap, get checked() { return input.checked; }, set(v) { input.checked = !!v; o.onChange && o.onChange(input.checked); } };\n  }\n\n  function legend(parent, items) {\n    const wrap = h('div', { class: 'dk-legend' });\n    for (const it of items) {\n      const key = h('i', { class: it.kind === 'box' ? 'dk-key-box' : it.kind === 'dash' ? 'dk-key-dash' : 'dk-key-line' });\n      key.style.color = it.color;\n      wrap.append(h('span', null, key, document.createTextNode(it.label)));\n    }\n    parent.append(wrap);\n    return wrap;\n  }\n\n  function stepper(parent, o) {\n    let i = o.start || 0;\n    const back = h('button', { type: 'button', text: 'Back' });\n    const next = h('button', { type: 'button', text: 'Next' });\n    const dots = h('div', { class: 'dk-dots', 'aria-hidden': 'true' });\n    for (let k = 0; k \u003c o.count; k++) dots.append(h('i'));\n    const count = h('span', { class: 'dk-count' });\n    const wrap = h('div', { class: 'dk-steps' }, back, next, dots, count);\n    parent.append(wrap);\n    function go(k) {\n      if (o.loop) k = (k + o.count) % o.count;\n      i = Math.max(0, Math.min(o.count - 1, k));\n      back.disabled = !o.loop && i === 0;\n      next.disabled = !o.loop && i === o.count - 1;\n      [...dots.children].forEach((d, j) => d.classList.toggle('on', j === i));\n      count.textContent = (i + 1) + ' / ' + o.count;\n      o.render(i);\n    }\n    back.addEventListener('click', () => go(i - 1));\n    next.addEventListener('click', () => go(i + 1));\n    document.addEventListener('keydown', (e) => {\n      if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;\n      if (e.key === 'ArrowRight') go(i + 1);\n      if (e.key === 'ArrowLeft') go(i - 1);\n    });\n    go(i);\n    return { el: wrap, go, get index() { return i; } };\n  }\n\n  /** Adds an open-chevron arrow marker to an \u003csvg>; use marker-end=\"url(#id)\". */\n  function arrowDefs(root, id = 'dk-arrow', stroke = INK.secondary) {\n    let defs = root.querySelector('defs') || svg('defs', null, null);\n    if (!defs.parentNode) root.prepend(defs);\n    const m = svg('marker', { id, viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);\n    svg('path', { d: 'M2 1L8 5L2 9', fill: 'none', stroke, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, m);\n    return 'url(#' + id + ')';\n  }\n\n  /* ---------------- plot ---------------- */\n  /*\n   * DK.plot(container, {\n   *   x: [min, max],                 required\n   *   y: [min, max] | 'auto',        default 'auto' (from the series)\n   *   xLabel, yLabel,                short, sentence case (y label sits above the axis, never rotated)\n   *   grid: 'y' | 'both' | 'none',   default 'y'; use 'both' for math graphs\n   *   xTicks, yTicks: count | array of values,\n   *   xFormat, yFormat: v => string,   hoverXFormat: v => string (tooltip title, defaults to xFormat)\n   *   series: [{ label, fn: x => y | points: [[x, y], ...], color, dashed, area, dots, endLabel }],\n   *   marks(g, api),                 custom drawing above the series (api.sx, api.sy, api.svg, api.clip ...)\n   *   hover: true,                   crosshair + tooltip; false turns both off (onHover still fires)\n   *   onHover(x | null, api),        react to the hovered x (safe to call update() from here)\n   *   tooltip(x) => { title, rows: [{ label, value, color }] }   optional custom tooltip\n   * })\n   * Returns { update(partialOpts), redraw(), api }.\n   */\n  function plot(container, opts) {\n    const el = typeof container === 'string' ? document.querySelector(container) : container;\n    el.style.position = el.style.position || 'relative';\n    const root = svg('svg', { role: 'img', 'aria-label': opts.ariaLabel || opts.yLabel || 'Plot' }, el);\n    root.style.overflow = 'visible';\n    const tip = h('div', { class: 'dk-tip', hidden: true });\n    el.append(tip);\n    let o = Object.assign({ grid: 'y', hover: true, y: 'auto', series: [] }, opts);\n    let api = null, hoverX = null, uid = Math.random().toString(36).slice(2, 7);\n\n    function yDomain(W) {\n      if (Array.isArray(o.y)) return o.y;\n      let lo = Infinity, hi = -Infinity;\n      for (const s of o.series) {\n        const pts = s.points || sample(s.fn, o.x[0], o.x[1], 200);\n        for (const [, y] of pts) if (isFinite(y)) { lo = Math.min(lo, y); hi = Math.max(hi, y); }\n      }\n      if (!isFinite(lo)) { lo = 0; hi = 1; }\n      if (lo === hi) { lo -= 1; hi += 1; }\n      const pad = (hi - lo) * 0.08;\n      if (lo >= 0 && lo - pad \u003c 0 && lo \u003c (hi - lo) * 0.3) lo = 0; else lo -= pad;\n      hi += pad;\n      const t = ticks(lo, hi, 5);\n      return [Math.min(lo, t.values[0]), Math.max(hi, t.values[t.values.length - 1])];\n    }\n\n    function sample(fn, a, b, n) {\n      const pts = [];\n      for (let k = 0; k \u003c= n; k++) { const x = a + (b - a) * k / n; pts.push([x, fn(x)]); }\n      return pts;\n    }\n\n    function draw() {\n      const W = Math.max(120, el.clientWidth), H = Math.max(100, el.clientHeight);\n      root.setAttribute('viewBox', `0 0 ${W} ${H}`);\n      root.setAttribute('width', W);\n      root.setAttribute('height', H);\n      root.textContent = '';\n      const [x0, x1] = o.x;\n      const [y0, y1] = yDomain(W);\n      const xt = Array.isArray(o.xTicks) ? { values: o.xTicks, step: 1 } : ticks(x0, x1, o.xTicks || Math.max(3, Math.round(W / 90)));\n      const yt = Array.isArray(o.yTicks) ? { values: o.yTicks, step: 1 } : ticks(y0, y1, o.yTicks || Math.max(3, Math.round(H / 60)));\n      const xf = o.xFormat || ((v) => fmt(v, tickDigits(xt.step)));\n      const yf = o.yFormat || ((v) => fmt(v, tickDigits(yt.step)));\n      const yLabelW = Math.max(...yt.values.map((v) => yf(v).length)) * 6.6 + 10;\n      const endW = Math.max(0, ...o.series.filter((s) => s.endLabel).map((s) => (s.label || '').length * 6.8 + 14));\n      const m = { l: Math.max(28, yLabelW), r: 10 + endW, t: o.yLabel ? 24 : 8, b: o.xLabel ? 40 : 24 };\n      const pw = W - m.l - m.r, ph = H - m.t - m.b;\n      const sx = (x) => m.l + (x - x0) / (x1 - x0) * pw;\n      const sy = (y) => m.t + (1 - (y - y0) / (y1 - y0)) * ph;\n      const ix = (px) => x0 + (px - m.l) / pw * (x1 - x0);\n\n      const defs = svg('defs', null, root);\n      const clip = svg('clipPath', { id: 'dk-clip-' + uid }, defs);\n      svg('rect', { x: m.l, y: m.t - 1, width: pw, height: ph + 2 }, clip);\n\n      // grid + ticks\n      const g = svg('g', null, root);\n      for (const v of yt.values) {\n        if (v \u003c y0 - 1e-9 || v > y1 + 1e-9) continue;\n        if (o.grid !== 'none') svg('line', { x1: m.l, x2: m.l + pw, y1: sy(v), y2: sy(v), class: 'dk-grid' }, g);\n        svg('text', { x: m.l - 8, y: sy(v), class: 'tm', 'text-anchor': 'end', 'dominant-baseline': 'central', text: yf(v) }, g);\n      }\n      for (const v of xt.values) {\n        if (v \u003c x0 - 1e-9 || v > x1 + 1e-9) continue;\n        if (o.grid === 'both') svg('line', { x1: sx(v), x2: sx(v), y1: m.t, y2: m.t + ph, class: 'dk-grid' }, g);\n        svg('text', { x: sx(v), y: m.t + ph + 15, class: 'tm', 'text-anchor': 'middle', text: xf(v) }, g);\n      }\n      // axes: zero lines when zero is in view, otherwise the plot edges\n      const ax = y0 \u003c= 0 && y1 >= 0 ? sy(0) : m.t + ph;\n      const ay = x0 \u003c= 0 && x1 >= 0 ? sx(0) : m.l;\n      svg('line', { x1: m.l, x2: m.l + pw, y1: ax, y2: ax, class: 'dk-axis' }, g);\n      svg('line', { x1: ay, x2: ay, y1: m.t, y2: m.t + ph, class: 'dk-axis' }, g);\n      if (o.xLabel) svg('text', { x: m.l + pw, y: H - 6, class: 'ts', 'text-anchor': 'end', text: o.xLabel }, g);\n      if (o.yLabel) svg('text', { x: m.l - 8, y: 12, class: 'ts', text: o.yLabel }, g);\n\n      api = { svg: root, sx, sy, ix, x: [x0, x1], y: [y0, y1], plot: { x: m.l, y: m.t, w: pw, h: ph }, clip: 'url(#dk-clip-' + uid + ')', color, el: (t, a, p) => svg(t, a, p) };\n\n      // series\n      const sg = svg('g', { 'clip-path': api.clip }, root);\n      const ends = [];\n      o.series.forEach((s, i) => {\n        const c = s.color || color(i + 1);\n        const pts = s.points || sample(s.fn, x0, x1, Math.max(60, Math.round(pw / 2)));\n        let d = '', pen = false, area = '';\n        for (const [x, y] of pts) {\n          if (!isFinite(y) || Math.abs(y - (y0 + y1) / 2) > (y1 - y0) * 20) { pen = false; continue; }\n          d += (pen ? 'L' : 'M') + sx(x).toFixed(1) + ',' + sy(y).toFixed(1);\n          pen = true;\n        }\n        if (s.area) {\n          const base = sy(Math.max(y0, Math.min(y1, 0)));\n          const fin = pts.filter(([, y]) => isFinite(y));\n          if (fin.length) area = `M${sx(fin[0][0])},${base}` + fin.map(([x, y]) => `L${sx(x).toFixed(1)},${sy(y).toFixed(1)}`).join('') + `L${sx(fin[fin.length - 1][0])},${base}Z`;\n          svg('path', { d: area, class: 'dk-area', fill: c }, sg);\n        }\n        if (!s.dotsOnly) svg('path', { d, class: 'dk-line', stroke: c, 'stroke-dasharray': s.dashed ? '6 5' : null }, sg);\n        if (s.points && (s.dots || s.dotsOnly)) for (const [x, y] of pts) svg('circle', { cx: sx(x), cy: sy(y), r: 4, class: 'dk-dot', fill: c }, sg);\n        if (s.endLabel) {\n          const last = [...pts].reverse().find(([, y]) => isFinite(y) && y >= y0 && y \u003c= y1);\n          if (last) ends.push({ y: sy(last[1]), x: sx(last[0]), label: s.label, c });\n        }\n      });\n      // end labels: nudge apart only a little; leader line keeps them attached\n      ends.sort((a, b) => a.y - b.y);\n      for (let k = 1; k \u003c ends.length; k++) if (ends[k].y - ends[k - 1].y \u003c 15) ends[k].ly = (ends[k - 1].ly ?? ends[k - 1].y) + 15;\n      for (const e of ends) {\n        const ly = e.ly ?? e.y;\n        if (Math.abs(ly - e.y) > 2) svg('path', { d: `M${e.x + 3},${e.y} L${e.x + 8},${ly}`, class: 'leader' }, root);\n        svg('text', { x: e.x + 10, y: ly, class: 'ts', 'dominant-baseline': 'central', text: e.label }, root);\n      }\n\n      if (o.marks) o.marks(svg('g', null, root), api);\n\n      // hover layer\n      const hg = svg('g', { 'pointer-events': 'none' }, root);\n      api.hoverLayer = hg;\n      if (hoverX != null) drawHover(hoverX);\n    }\n\n    function valueAt(s, x) {\n      if (s.fn) return s.fn(x);\n      let best = null;\n      for (const p of s.points) if (!best || Math.abs(p[0] - x) \u003c Math.abs(best[0] - x)) best = p;\n      return best ? best[1] : NaN;\n    }\n\n    function snapX(x) {\n      const pts = o.series.filter((s) => s.points).flatMap((s) => s.points.map((p) => p[0]));\n      if (!pts.length || o.series.some((s) => s.fn)) return x;\n      return pts.reduce((a, b) => (Math.abs(b - x) \u003c Math.abs(a - x) ? b : a));\n    }\n\n    function drawHover(x) {\n      const hg = api.hoverLayer;\n      hg.textContent = '';\n      tip.hidden = true;\n      if (x == null || !o.hover) return;\n      const { sx, sy, plot: P } = api;\n      const px = sx(x);\n      svg('line', { x1: px, x2: px, y1: P.y, y2: P.y + P.h, class: 'dk-crosshair' }, hg);\n      const rows = [];\n      o.series.forEach((s, i) => {\n        if (s.hover === false) return;\n        const c = s.color || color(i + 1);\n        const y = valueAt(s, x);\n        if (!isFinite(y)) return;\n        if (y >= api.y[0] && y \u003c= api.y[1]) svg('circle', { cx: px, cy: sy(y), r: 4.5, class: 'dk-dot', fill: c }, hg);\n        rows.push({ label: s.label || 'y', value: (o.yFormat || fmt)(y), color: c, dashed: s.dashed });\n      });\n      const custom = o.tooltip ? o.tooltip(x) : null;\n      const title = custom && custom.title != null ? custom.title : (o.xLabel ? o.xLabel + ' ' : 'x = ') + (o.hoverXFormat || o.xFormat || fmt)(x);\n      const list = custom && custom.rows ? custom.rows : rows;\n      tip.textContent = '';\n      tip.append(h('div', { class: 'dk-tip-head', text: title }));\n      for (const r of list) {\n        const key = h('i', { class: r.dashed ? 'dk-key-dash' : 'dk-key-line' });\n        key.style.color = r.color || INK.secondary;\n        tip.append(h('div', { class: 'dk-tip-row' }, key, h('span', { text: r.label }), h('span', { class: 'dk-value', text: r.value })));\n      }\n      tip.hidden = false;\n      const W = el.clientWidth;\n      const tw = tip.offsetWidth;\n      tip.style.left = (px + 14 + tw > W ? px - 14 - tw : px + 14) + 'px';\n      tip.style.top = (P.y + 4) + 'px';\n    }\n\n    root.addEventListener('pointermove', (e) => {\n      if (!api) return;\n      const r = root.getBoundingClientRect();\n      const px = e.clientX - r.left;\n      const P = api.plot;\n      if (px \u003c P.x || px > P.x + P.w || e.clientY - r.top \u003c P.y - 10 || e.clientY - r.top > P.y + P.h + 10) { hoverX = null; drawHover(null); if (o.onHover) o.onHover(null, api); return; }\n      hoverX = snapX(api.ix(px));\n      drawHover(hoverX);\n      if (o.onHover) o.onHover(hoverX, api);\n    });\n    root.addEventListener('pointerleave', () => { hoverX = null; drawHover(null); if (o.onHover) o.onHover(null, api); });\n\n    draw();\n    if (window.ResizeObserver) new ResizeObserver(() => draw()).observe(el);\n    return {\n      update(partial) { o = Object.assign(o, partial); draw(); },\n      redraw: draw,\n      get api() { return api; },\n    };\n  }\n\n  window.DK = { svg, h, color, fmt, ticks, slider, segmented, toggle, legend, stepper, arrowDefs, plot, INK, SERIES };\n})();\n\n\u003c/script>\n\u003cscript>\n  // Intel syntax, System V calling convention. Matches the create / destroy cards on the board.\n  const CODE = [\n    ['main:', 'label'],\n    ['  mov  edi, 2', '; argument'],\n    ['  call add', '; push return addr, jump'],\n    ['  mov  esi, eax', '; return point'],\n    ['add:', 'label'],\n    ['  push rbp', \"; save main's rbp\"],\n    ['  mov  rbp, rsp', '; new frame starts'],\n    ['  sub  rsp, 16', '; allocate locals'],\n    ['  mov  [rbp-4], edi', '; a = 2'],\n    ['  mov  eax, [rbp-4]', ''],\n    ['  add  eax, 3', '; return value in eax'],\n    ['  add  rsp, 16', '; free locals'],\n    ['  pop  rbp', \"; restore main's rbp\"],\n    ['  ret', '; pop return addr, jump'],\n  ];\n\n  // Stack slots, top (high address) to bottom. Slots 0-1 are main's frame.\n  const ADDR = { 1: '0x7fe0', 2: '0x7fd8', 3: '0x7fd0', 4: '0x7fc8', 5: '0x7fc0' };\n  const SLOT_Y = (k) => 30 + k * 40;\n  const POS = { '0x7ff0': SLOT_Y(0), '0x7fe0': SLOT_Y(1) + 20, '0x7fd8': SLOT_Y(2) + 20, '0x7fd0': SLOT_Y(3) + 20, '0x7fc0': SLOT_Y(5) + 20 };\n\n  // live: slots in use; stale: freed slots that still hold old bytes\n  const STEPS = [\n    { phase: 'Before the call', lines: [1], rsp: '0x7fe0', rbp: '0x7ff0', eax: '–', where: 'main', live: [], set: false,\n      text: 'main is running. rbp and rsp bracket main’s frame.' },\n    { phase: 'Create frame 1 / 4', lines: [2], target: 3, rsp: '0x7fd8', rbp: '0x7ff0', eax: '–', where: 'add', live: [2], set: false,\n      text: 'call pushes the return address (line 4, the instruction after the call) and jumps to add.' },\n    { phase: 'Create frame 2 / 4', lines: [5], rsp: '0x7fd0', rbp: '0x7ff0', eax: '–', where: 'add', live: [2, 3], set: false,\n      text: 'push rbp saves main’s base pointer. rbp still points into main’s frame.' },\n    { phase: 'Create frame 3 / 4', lines: [6], rsp: '0x7fd0', rbp: '0x7fd0', eax: '–', where: 'add', live: [2, 3], set: false,\n      text: 'mov rbp, rsp: rbp now marks the base of add’s frame. The new frame starts here.' },\n    { phase: 'Create frame 4 / 4', lines: [7], rsp: '0x7fc0', rbp: '0x7fd0', eax: '–', where: 'add', live: [2, 3, 4, 5], set: false,\n      text: 'sub rsp, 16 allocates space for locals. The stack grows toward lower addresses.' },\n    { phase: 'Body, then destroy frame 1 / 4', lines: [8, 9, 10], rsp: '0x7fc0', rbp: '0x7fd0', eax: '5', where: 'add', live: [2, 3, 4, 5], set: true,\n      text: 'The body runs (a = 2 at rbp−4), then the return value goes into eax.' },\n    { phase: 'Destroy frame 2 / 4', lines: [11], rsp: '0x7fd0', rbp: '0x7fd0', eax: '5', where: 'add', live: [2, 3], stale: [4, 5], set: true,\n      text: 'add rsp, 16 frees the locals. The bytes are still there, but they are now garbage.' },\n    { phase: 'Destroy frame 3 / 4', lines: [12], rsp: '0x7fd8', rbp: '0x7ff0', eax: '5', where: 'add', live: [2], stale: [3, 4, 5], set: true,\n      text: 'pop rbp restores main’s base pointer. add’s frame is gone.' },\n    { phase: 'Destroy frame 4 / 4', lines: [13], target: 3, rsp: '0x7fe0', rbp: '0x7ff0', eax: '5', where: 'main', live: [], stale: [2, 3, 4, 5], set: true,\n      text: 'ret pops the return address and jumps back to line 4. rsp is where it was before the call, and eax = 5.' },\n  ];\n\n  const code = document.getElementById('code');\n  for (const [t, c] of CODE) {\n    const li = DK.h('li', { class: c === 'label' ? 'label' : '' });\n    li.append(document.createTextNode(t.padEnd(19)));\n    if (c && c !== 'label') li.append(DK.h('span', { class: 'c', text: c }));\n    code.append(li);\n  }\n\n  const svg = document.getElementById('stack');\n  const arrow = DK.arrowDefs(svg, 'ptr', DK.INK.secondary);\n  const layer = DK.svg('g', null, svg);\n  let prev = null;\n\n  function cell(g, k, cls, title, sub, h = 40) {\n    const y = SLOT_Y(k);\n    const grp = DK.svg('g', { class: cls }, g);\n    DK.svg('rect', { x: 90, y: y + 1, width: 160, height: h - 2, rx: 4 }, grp);\n    if (sub) {\n      DK.svg('text', { x: 170, y: y + h / 2 - 8, class: 'th', 'text-anchor': 'middle', 'dominant-baseline': 'central', text: title }, grp);\n      DK.svg('text', { x: 170, y: y + h / 2 + 9, class: 'ts', 'text-anchor': 'middle', 'dominant-baseline': 'central', text: sub }, grp);\n    } else {\n      DK.svg('text', { x: 170, y: y + h / 2, class: 'th', 'text-anchor': 'middle', 'dominant-baseline': 'central', text: title }, grp);\n    }\n  }\n\n  function pointer(g, name, y) {\n    DK.svg('text', { x: 18, y, class: 'tmono', 'dominant-baseline': 'central', text: name }, g);\n    DK.svg('line', { x1: 50, y1: y, x2: 84, y2: y, class: 'arr', 'marker-end': arrow }, g);\n  }\n\n  function render(i) {\n    const s = STEPS[i];\n    [...code.children].forEach((li, n) => {\n      li.classList.toggle('on', s.lines.includes(n));\n      li.classList.toggle('target', s.target === n);\n    });\n\n    const regs = document.getElementById('regs');\n    regs.textContent = '';\n    regs.append(DK.h('span', { class: 'phase', text: s.phase }));\n    for (const [k, v] of [['rsp', s.rsp], ['rbp', s.rbp], ['eax', s.eax], ['running', s.where]]) {\n      const changed = prev && prev[k === 'running' ? 'where' : k] !== v;\n      regs.append(DK.h('span', { class: changed ? 'changed' : '' }, k + ' ', DK.h('b', { text: v })));\n    }\n\n    layer.textContent = '';\n    DK.svg('text', { x: 90, y: 14, class: 'ts', text: 'Higher addresses' }, layer);\n    cell(layer, 0, 'c-gray', 'main’s frame', null, 80);\n    const content = {\n      2: ['return address', 'line 4 in main', 'c-purple'],\n      3: ['saved rbp', 'main’s 0x7ff0', 'c-purple'],\n      4: ['a = ' + (s.set ? '2' : '?'), 'rbp−4', 'c-teal'],\n      5: ['padding', '16-byte alignment', 'c-teal'],\n    };\n    for (const k of [2, 3, 4, 5]) {\n      const [t, sub, c] = content[k];\n      const live = s.live.includes(k), stale = (s.stale || []).includes(k);\n      if (live) cell(layer, k, c, t, sub);\n      else if (stale) cell(layer, k, 'stale', t, 'stale');\n      if (live || stale) DK.svg('text', { x: 258, y: SLOT_Y(k) + 20, class: 'tm', 'dominant-baseline': 'central', text: ADDR[k] }, layer);\n    }\n    DK.svg('text', { x: 258, y: SLOT_Y(1) + 20, class: 'tm', 'dominant-baseline': 'central', text: ADDR[1] }, layer);\n    DK.svg('text', { x: 90, y: 296, class: 'ts', text: 'Lower addresses: the stack grows down' }, layer);\n\n    const same = s.rsp === s.rbp;\n    pointer(layer, 'rbp', POS[s.rbp] - (same ? 9 : 0));\n    pointer(layer, 'rsp', POS[s.rsp] + (same ? 9 : 0));\n\n    document.getElementById('caption').textContent = s.text;\n    prev = s;\n  }\n\n  DK.stepper(document.getElementById('nav'), { count: STEPS.length, render });\n\u003c/script>\n\u003c/body>\n\u003c/html>\n","diagrams/stack-overflow.html":"\u003c!doctype html>\r\n\u003chtml lang=\"en\">\r\n\u003chead>\r\n\u003cmeta charset=\"utf-8\">\r\n\u003cmeta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\r\n\u003ctitle>Stack overflow\u003c/title>\r\n\u003cstyle>\n/*\n * Diagram kit: the shared look for every interactive diagram on a board.\n * Flat white surface, hairline chrome in warm grays, two font weights,\n * sentence case, color only where it carries meaning.\n * Diagrams link this file and diagram-kit.js with relative paths\n * (../../../engine/...); see engine/DIAGRAM_STYLE.md. The export script\n * inlines both, so exported boards still work offline.\n */\n:root {\n  /* surfaces and ink */\n  --surface: #ffffff;\n  --surface-1: #fcfcfb;\n  --surface-2: #f5f4f0;\n  --text-primary: #0b0b0b;\n  --text-secondary: #52514e;\n  --text-muted: #898781;\n  --grid: #ecebe5;\n  --axis: #c3c2b7;\n  --border: rgba(11, 11, 11, 0.10);\n  --border-strong: rgba(11, 11, 11, 0.20);\n  --accent: #2a78d6;\n  --highlight: rgba(250, 178, 25, 0.33);\n\n  /* series colors: always assign in this order, never cycle */\n  --series-1: #2a78d6;   /* blue */\n  --series-2: #eb6834;   /* orange */\n  --series-3: #1baf7a;   /* aqua */\n  --series-4: #eda100;   /* yellow */\n  --series-5: #e87ba4;   /* magenta */\n  --series-6: #008300;   /* green */\n  --series-7: #6250d6;   /* violet */\n  --series-8: #e34948;   /* red */\n  --context: #c3c2b7;    /* de-emphasized series */\n\n  --font: ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", sans-serif;\n  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;\n  --radius: 8px;\n}\n\n* { box-sizing: border-box; }\nhtml, body { margin: 0; background: var(--surface); color: var(--text-primary); }\nbody {\n  font: 400 14px/1.5 var(--font);\n  padding: 14px 18px 12px;\n  min-height: 100vh;\n  display: flex;\n  flex-direction: column;\n  gap: 10px;\n  -webkit-font-smoothing: antialiased;\n}\nb, strong, h1, h2, h3, th { font-weight: 500; }\ncode, .mono { font-family: var(--mono); font-size: 0.92em; }\n.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }\n\n/* ---------- layout ---------- */\n.dk-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }\n.dk-fill { flex: 1; min-height: 0; position: relative; display: flex; }\n.dk-fill > svg { flex: 1; width: 100%; height: 100%; display: block; }\n.dk-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; flex: 1; min-height: 0; }\n\n/* ---------- text ---------- */\n.dk-caption { font-size: 12px; color: var(--text-muted); }\n.dk-readout { font-size: 14px; color: var(--text-secondary); min-height: 1.5em; }\n.dk-readout b { color: var(--text-primary); }\n.dk-value { font-weight: 500; color: var(--text-primary); font-variant-numeric: tabular-nums; }\n.dk-mark { background: linear-gradient(transparent 55%, var(--highlight) 55%); }\n\n/* ---------- controls ---------- */\n.dk-control { display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-secondary); }\n.dk-control output { min-width: 3.2em; color: var(--text-primary); font-weight: 500; font-variant-numeric: tabular-nums; }\ninput[type=range] { appearance: none; -webkit-appearance: none; width: 140px; height: 18px; background: transparent; margin: 0; cursor: pointer; }\ninput[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, var(--text-primary) var(--p, 0%), var(--grid) var(--p, 0%)); }\ninput[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--grid); }\ninput[type=range]::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--text-primary); }\ninput[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 50%; background: var(--surface); border: 1.5px solid var(--text-primary); }\ninput[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: var(--surface); border: 1.5px solid var(--text-primary); }\n\nbutton, .dk-btn {\n  font: 400 13px var(--font); color: var(--text-primary); background: transparent;\n  border: 0.5px solid var(--border-strong); border-radius: var(--radius); padding: 5px 12px; cursor: pointer;\n}\nbutton:hover { background: var(--surface-2); }\nbutton:active { transform: scale(0.98); }\nbutton:disabled { color: var(--text-muted); cursor: default; background: transparent; transform: none; }\n:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }\n\n.dk-seg { display: inline-flex; border: 0.5px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; }\n.dk-seg button { border: 0; border-radius: 0; padding: 5px 11px; }\n.dk-seg button + button { border-left: 0.5px solid var(--border-strong); }\n.dk-seg button[aria-pressed=\"true\"] { background: var(--text-primary); color: var(--surface); }\n\n.dk-toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none; }\n.dk-toggle input { appearance: none; -webkit-appearance: none; width: 30px; height: 18px; border-radius: 9px; background: var(--axis); position: relative; cursor: pointer; margin: 0; transition: background .15s; }\n.dk-toggle input::after { content: \"\"; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }\n.dk-toggle input:checked { background: var(--text-primary); }\n.dk-toggle input:checked::after { transform: translateX(12px); }\n\n/* ---------- legend ---------- */\n.dk-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--text-secondary); }\n.dk-legend span { display: inline-flex; align-items: center; gap: 6px; }\n.dk-key-line { width: 14px; height: 0; border-top: 2px solid currentColor; border-radius: 1px; }\n.dk-key-dash { width: 14px; height: 0; border-top: 2px dashed currentColor; }\n.dk-key-box { width: 10px; height: 10px; border-radius: 2px; background: currentColor; }\n\n/* ---------- step-through ---------- */\n.dk-steps { display: flex; align-items: center; gap: 12px; }\n.dk-dots { display: flex; gap: 6px; }\n.dk-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--axis); }\n.dk-dots i.on { background: var(--text-primary); }\n.dk-steps .dk-count { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }\n\n/* ---------- SVG text and marks ---------- */\nsvg text { font-family: var(--font); }\n.t  { font-size: 14px; fill: var(--text-primary); }\n.th { font-size: 14px; font-weight: 500; fill: var(--text-primary); }\n.ts { font-size: 12px; fill: var(--text-secondary); }\n.tm { font-size: 11px; fill: var(--text-muted); font-variant-numeric: tabular-nums; }\n.tmono { font-family: var(--mono); font-size: 12px; fill: var(--text-primary); }\n.dk-grid { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }\n.dk-axis { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }\n.dk-zero { stroke: var(--axis); stroke-width: 1; }\n.dk-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }\n.dk-area { stroke: none; opacity: 0.10; }\n.dk-dot { stroke: var(--surface); stroke-width: 2; }\n.dk-guide { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; fill: none; }\n.dk-crosshair { stroke: var(--text-muted); stroke-width: 1; shape-rendering: crispEdges; }\n.box { fill: var(--surface-1); stroke: var(--border-strong); stroke-width: 0.5; }\n.arr { fill: none; stroke: var(--text-secondary); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }\n.leader { fill: none; stroke: var(--text-muted); stroke-width: 0.5; stroke-dasharray: 3 3; }\n\n/* Color ramps for boxes and regions: 50 fill, 600 stroke, 800 title, 600 subtitle.\n   Use on \u003crect>/\u003ccircle>/\u003cg>. Pick 2-3 per diagram; gray for neutral structure. */\n.c-gray   { --c50:#F1EFE8; --c200:#B4B2A9; --c600:#5F5E5A; --c800:#444441; }\n.c-blue   { --c50:#E6F1FB; --c200:#85B7EB; --c600:#185FA5; --c800:#0C447C; }\n.c-teal   { --c50:#E1F5EE; --c200:#5DCAA5; --c600:#0F6E56; --c800:#085041; }\n.c-purple { --c50:#EEEDFE; --c200:#AFA9EC; --c600:#534AB7; --c800:#3C3489; }\n.c-coral  { --c50:#FAECE7; --c200:#F0997B; --c600:#993C1D; --c800:#712B13; }\n.c-pink   { --c50:#FBEAF0; --c200:#ED93B1; --c600:#993556; --c800:#72243E; }\n.c-green  { --c50:#EAF3DE; --c200:#97C459; --c600:#3B6D11; --c800:#27500A; }\n.c-amber  { --c50:#FAEEDA; --c200:#EF9F27; --c600:#854F0B; --c800:#633806; }\n.c-red    { --c50:#FCEBEB; --c200:#F09595; --c600:#A32D2D; --c800:#791F1F; }\n:is(rect, circle, ellipse, polygon):is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red),\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > :is(rect, circle, ellipse, polygon) {\n  fill: var(--c50); stroke: var(--c600); stroke-width: 0.5;\n}\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .th,\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .t { fill: var(--c800); }\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .ts,\n:is(.c-gray, .c-blue, .c-teal, .c-purple, .c-coral, .c-pink, .c-green, .c-amber, .c-red) > .tmono { fill: var(--c600); }\n.is-active > :is(rect, circle) { stroke-width: 1.5; }\n.c-chip { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; background: var(--c50); color: var(--c800); }\n\n/* ---------- tooltip ---------- */\n.dk-tip {\n  position: absolute; pointer-events: none; z-index: 2;\n  background: var(--surface); border: 0.5px solid var(--border-strong); border-radius: var(--radius);\n  padding: 6px 10px; font-size: 12px; color: var(--text-secondary); white-space: nowrap;\n  box-shadow: 0 4px 14px -6px rgba(11, 11, 11, 0.18);\n}\n.dk-tip .dk-tip-head { color: var(--text-muted); margin-bottom: 2px; font-variant-numeric: tabular-nums; }\n.dk-tip .dk-tip-row { display: flex; align-items: center; gap: 8px; }\n.dk-tip .dk-tip-row .dk-value { margin-left: auto; padding-left: 12px; }\n\n/* ---------- motion ---------- */\n.dk-anim { transition: transform .25s ease, opacity .25s ease; }\n@media (prefers-reduced-motion: reduce) { .dk-anim, .dk-toggle input, .dk-toggle input::after { transition: none; } }\n\n\u003c/style>\r\n\u003cstyle>\r\n  .limit { stroke: #A32D2D; stroke-width: 1; stroke-dasharray: 4 3; }\r\n  .lim-label { font-size: 11px; fill: #A32D2D; }\r\n\u003c/style>\r\n\u003c/head>\r\n\u003cbody>\r\n\u003ch2 class=\"sr-only\">Raise the recursion depth and watch each call add a frame; once rsp passes the stack limit the program crashes with a segmentation fault.\u003c/h2>\r\n\u003cdiv class=\"dk-row\" id=\"controls\">\u003c/div>\r\n\u003cdiv class=\"dk-fill\">\u003csvg id=\"stack\" viewBox=\"0 0 520 250\" preserveAspectRatio=\"xMidYMid meet\" role=\"img\" aria-label=\"Stack filling up with frames\">\u003c/svg>\u003c/div>\r\n\u003cdiv class=\"dk-readout\" id=\"readout\">\u003c/div>\r\n\u003cdiv class=\"dk-caption\">Illustrative: a tiny stack that fits 10 small frames. Real stacks are about 8 MB.\u003c/div>\r\n\r\n\u003cscript>\n/*\n * Diagram kit helpers. No dependencies; everything draws plain SVG in the\n * shared style from diagram-kit.css. The main pieces:\n *\n *   DK.plot(el, opts)        function / data plot with axes, crosshair and tooltip\n *   DK.slider(parent, opts)  labelled range slider with a live value\n *   DK.segmented(parent, o)  pick-one buttons\n *   DK.toggle(parent, opts)  on/off switch\n *   DK.legend(parent, items) line / box keys (use for 2+ series)\n *   DK.stepper(parent, o)    Back / Next with dots, for step-through diagrams\n *   DK.svg(tag, attrs, parent), DK.h(tag, attrs, ...kids), DK.fmt(n), DK.color(i)\n *\n * See engine/DIAGRAM_STYLE.md for when to use each and the rules they follow.\n */\n(function () {\n  'use strict';\n  const NS = 'http://www.w3.org/2000/svg';\n  const SERIES = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];\n  const INK = { primary: '#0b0b0b', secondary: '#52514e', muted: '#898781', grid: '#ecebe5', axis: '#c3c2b7', surface: '#ffffff', context: '#c3c2b7' };\n\n  function svg(tag, attrs, parent) {\n    const n = document.createElementNS(NS, tag);\n    for (const k in attrs || {}) {\n      const v = attrs[k];\n      if (v == null || v === false) continue;\n      if (k === 'text') n.textContent = v;\n      else n.setAttribute(k, v);\n    }\n    if (parent) parent.append(n);\n    return n;\n  }\n\n  function h(tag, attrs, ...kids) {\n    const n = document.createElement(tag);\n    for (const k in attrs || {}) {\n      const v = attrs[k];\n      if (v == null || v === false) continue;\n      if (k === 'text') n.textContent = v;\n      else if (k === 'class') n.className = v;\n      else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);\n      else n.setAttribute(k, v === true ? '' : v);\n    }\n    for (const kid of kids) if (kid != null) n.append(kid);\n    return n;\n  }\n\n  /** Series color by slot (1-based, fixed order). Pass 0 or 'context' for the gray de-emphasis color. */\n  function color(i) {\n    if (!i || i === 'context') return INK.context;\n    return SERIES[(i - 1) % SERIES.length];\n  }\n\n  /** Round for display. Uses a real minus sign, trims trailing zeros. */\n  function fmt(v, digits) {\n    if (v == null || !isFinite(v)) return '–';\n    if (digits == null) {\n      const a = Math.abs(v);\n      digits = a === 0 ? 0 : a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 2 : 3;\n    }\n    let s = (+v.toFixed(digits)).toLocaleString('en-US', { maximumFractionDigits: digits });\n    if (s === '-0') s = '0';\n    return s.replace(/^-/, '−');\n  }\n\n  function niceStep(span, count) {\n    const raw = span / Math.max(1, count);\n    const p = Math.pow(10, Math.floor(Math.log10(raw)));\n    const m = raw / p;\n    return (m \u003c 1.5 ? 1 : m \u003c 3 ? 2 : m \u003c 7 ? 5 : 10) * p;\n  }\n  function ticks(min, max, count) {\n    const step = niceStep(max - min, count);\n    const out = [];\n    for (let v = Math.ceil(min / step) * step; v \u003c= max + step * 1e-9; v += step) out.push(Math.abs(v) \u003c step * 1e-9 ? 0 : v);\n    return { values: out, step };\n  }\n  function tickDigits(step) { return step >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(step) - 1e-9)); }\n\n  /* ---------------- controls ---------------- */\n\n  function slider(parent, o) {\n    const out = h('output');\n    const input = h('input', { type: 'range', min: o.min, max: o.max, step: o.step ?? 'any', value: o.value, 'aria-label': o.label });\n    const show = () => {\n      out.textContent = o.format ? o.format(+input.value) : fmt(+input.value);\n      input.style.setProperty('--p', ((+input.value - o.min) / (o.max - o.min) * 100) + '%');\n    };\n    input.addEventListener('input', () => { show(); o.onInput && o.onInput(+input.value); });\n    show();\n    const wrap = h('label', { class: 'dk-control' }, o.label ? h('span', { text: o.label }) : null, input, out);\n    if (o.width) input.style.width = o.width + 'px';\n    parent.append(wrap);\n    return {\n      el: wrap, input,\n      get value() { return +input.value; },\n      set(v, silent) { input.value = v; show(); if (!silent && o.onInput) o.onInput(+input.value); },\n    };\n  }\n\n  function segmented(parent, o) {\n    let value = o.value ?? o.options[0][0];\n    const wrap = h('div', { class: 'dk-control' });\n    if (o.label) wrap.append(h('span', { text: o.label }));\n    const seg = h('div', { class: 'dk-seg', role: 'group', 'aria-label': o.label || 'Options' });\n    const buttons = o.options.map(([v, label]) => {\n      const b = h('button', { type: 'button', text: label, 'aria-pressed': String(v === value) });\n      b.addEventListener('click', () => api.set(v));\n      seg.append(b);\n      return [v, b];\n    });\n    wrap.append(seg);\n    parent.append(wrap);\n    const api = {\n      el: wrap,\n      get value() { return value; },\n      set(v) { value = v; for (const [bv, b] of buttons) b.setAttribute('aria-pressed', String(bv === v)); o.onChange && o.onChange(v); },\n    };\n    return api;\n  }\n\n  function toggle(parent, o) {\n    const input = h('input', { type: 'checkbox', role: 'switch' });\n    input.checked = !!o.checked;\n    input.addEventListener('change', () => o.onChange && o.onChange(input.checked));\n    const wrap = h('label', { class: 'dk-toggle' }, input, h('span', { text: o.label }));\n    parent.append(wrap);\n    return { el: wrap, get checked() { return input.checked; }, set(v) { input.checked = !!v; o.onChange && o.onChange(input.checked); } };\n  }\n\n  function legend(parent, items) {\n    const wrap = h('div', { class: 'dk-legend' });\n    for (const it of items) {\n      const key = h('i', { class: it.kind === 'box' ? 'dk-key-box' : it.kind === 'dash' ? 'dk-key-dash' : 'dk-key-line' });\n      key.style.color = it.color;\n      wrap.append(h('span', null, key, document.createTextNode(it.label)));\n    }\n    parent.append(wrap);\n    return wrap;\n  }\n\n  function stepper(parent, o) {\n    let i = o.start || 0;\n    const back = h('button', { type: 'button', text: 'Back' });\n    const next = h('button', { type: 'button', text: 'Next' });\n    const dots = h('div', { class: 'dk-dots', 'aria-hidden': 'true' });\n    for (let k = 0; k \u003c o.count; k++) dots.append(h('i'));\n    const count = h('span', { class: 'dk-count' });\n    const wrap = h('div', { class: 'dk-steps' }, back, next, dots, count);\n    parent.append(wrap);\n    function go(k) {\n      if (o.loop) k = (k + o.count) % o.count;\n      i = Math.max(0, Math.min(o.count - 1, k));\n      back.disabled = !o.loop && i === 0;\n      next.disabled = !o.loop && i === o.count - 1;\n      [...dots.children].forEach((d, j) => d.classList.toggle('on', j === i));\n      count.textContent = (i + 1) + ' / ' + o.count;\n      o.render(i);\n    }\n    back.addEventListener('click', () => go(i - 1));\n    next.addEventListener('click', () => go(i + 1));\n    document.addEventListener('keydown', (e) => {\n      if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;\n      if (e.key === 'ArrowRight') go(i + 1);\n      if (e.key === 'ArrowLeft') go(i - 1);\n    });\n    go(i);\n    return { el: wrap, go, get index() { return i; } };\n  }\n\n  /** Adds an open-chevron arrow marker to an \u003csvg>; use marker-end=\"url(#id)\". */\n  function arrowDefs(root, id = 'dk-arrow', stroke = INK.secondary) {\n    let defs = root.querySelector('defs') || svg('defs', null, null);\n    if (!defs.parentNode) root.prepend(defs);\n    const m = svg('marker', { id, viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, defs);\n    svg('path', { d: 'M2 1L8 5L2 9', fill: 'none', stroke, 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }, m);\n    return 'url(#' + id + ')';\n  }\n\n  /* ---------------- plot ---------------- */\n  /*\n   * DK.plot(container, {\n   *   x: [min, max],                 required\n   *   y: [min, max] | 'auto',        default 'auto' (from the series)\n   *   xLabel, yLabel,                short, sentence case (y label sits above the axis, never rotated)\n   *   grid: 'y' | 'both' | 'none',   default 'y'; use 'both' for math graphs\n   *   xTicks, yTicks: count | array of values,\n   *   xFormat, yFormat: v => string,   hoverXFormat: v => string (tooltip title, defaults to xFormat)\n   *   series: [{ label, fn: x => y | points: [[x, y], ...], color, dashed, area, dots, endLabel }],\n   *   marks(g, api),                 custom drawing above the series (api.sx, api.sy, api.svg, api.clip ...)\n   *   hover: true,                   crosshair + tooltip; false turns both off (onHover still fires)\n   *   onHover(x | null, api),        react to the hovered x (safe to call update() from here)\n   *   tooltip(x) => { title, rows: [{ label, value, color }] }   optional custom tooltip\n   * })\n   * Returns { update(partialOpts), redraw(), api }.\n   */\n  function plot(container, opts) {\n    const el = typeof container === 'string' ? document.querySelector(container) : container;\n    el.style.position = el.style.position || 'relative';\n    const root = svg('svg', { role: 'img', 'aria-label': opts.ariaLabel || opts.yLabel || 'Plot' }, el);\n    root.style.overflow = 'visible';\n    const tip = h('div', { class: 'dk-tip', hidden: true });\n    el.append(tip);\n    let o = Object.assign({ grid: 'y', hover: true, y: 'auto', series: [] }, opts);\n    let api = null, hoverX = null, uid = Math.random().toString(36).slice(2, 7);\n\n    function yDomain(W) {\n      if (Array.isArray(o.y)) return o.y;\n      let lo = Infinity, hi = -Infinity;\n      for (const s of o.series) {\n        const pts = s.points || sample(s.fn, o.x[0], o.x[1], 200);\n        for (const [, y] of pts) if (isFinite(y)) { lo = Math.min(lo, y); hi = Math.max(hi, y); }\n      }\n      if (!isFinite(lo)) { lo = 0; hi = 1; }\n      if (lo === hi) { lo -= 1; hi += 1; }\n      const pad = (hi - lo) * 0.08;\n      if (lo >= 0 && lo - pad \u003c 0 && lo \u003c (hi - lo) * 0.3) lo = 0; else lo -= pad;\n      hi += pad;\n      const t = ticks(lo, hi, 5);\n      return [Math.min(lo, t.values[0]), Math.max(hi, t.values[t.values.length - 1])];\n    }\n\n    function sample(fn, a, b, n) {\n      const pts = [];\n      for (let k = 0; k \u003c= n; k++) { const x = a + (b - a) * k / n; pts.push([x, fn(x)]); }\n      return pts;\n    }\n\n    function draw() {\n      const W = Math.max(120, el.clientWidth), H = Math.max(100, el.clientHeight);\n      root.setAttribute('viewBox', `0 0 ${W} ${H}`);\n      root.setAttribute('width', W);\n      root.setAttribute('height', H);\n      root.textContent = '';\n      const [x0, x1] = o.x;\n      const [y0, y1] = yDomain(W);\n      const xt = Array.isArray(o.xTicks) ? { values: o.xTicks, step: 1 } : ticks(x0, x1, o.xTicks || Math.max(3, Math.round(W / 90)));\n      const yt = Array.isArray(o.yTicks) ? { values: o.yTicks, step: 1 } : ticks(y0, y1, o.yTicks || Math.max(3, Math.round(H / 60)));\n      const xf = o.xFormat || ((v) => fmt(v, tickDigits(xt.step)));\n      const yf = o.yFormat || ((v) => fmt(v, tickDigits(yt.step)));\n      const yLabelW = Math.max(...yt.values.map((v) => yf(v).length)) * 6.6 + 10;\n      const endW = Math.max(0, ...o.series.filter((s) => s.endLabel).map((s) => (s.label || '').length * 6.8 + 14));\n      const m = { l: Math.max(28, yLabelW), r: 10 + endW, t: o.yLabel ? 24 : 8, b: o.xLabel ? 40 : 24 };\n      const pw = W - m.l - m.r, ph = H - m.t - m.b;\n      const sx = (x) => m.l + (x - x0) / (x1 - x0) * pw;\n      const sy = (y) => m.t + (1 - (y - y0) / (y1 - y0)) * ph;\n      const ix = (px) => x0 + (px - m.l) / pw * (x1 - x0);\n\n      const defs = svg('defs', null, root);\n      const clip = svg('clipPath', { id: 'dk-clip-' + uid }, defs);\n      svg('rect', { x: m.l, y: m.t - 1, width: pw, height: ph + 2 }, clip);\n\n      // grid + ticks\n      const g = svg('g', null, root);\n      for (const v of yt.values) {\n        if (v \u003c y0 - 1e-9 || v > y1 + 1e-9) continue;\n        if (o.grid !== 'none') svg('line', { x1: m.l, x2: m.l + pw, y1: sy(v), y2: sy(v), class: 'dk-grid' }, g);\n        svg('text', { x: m.l - 8, y: sy(v), class: 'tm', 'text-anchor': 'end', 'dominant-baseline': 'central', text: yf(v) }, g);\n      }\n      for (const v of xt.values) {\n        if (v \u003c x0 - 1e-9 || v > x1 + 1e-9) continue;\n        if (o.grid === 'both') svg('line', { x1: sx(v), x2: sx(v), y1: m.t, y2: m.t + ph, class: 'dk-grid' }, g);\n        svg('text', { x: sx(v), y: m.t + ph + 15, class: 'tm', 'text-anchor': 'middle', text: xf(v) }, g);\n      }\n      // axes: zero lines when zero is in view, otherwise the plot edges\n      const ax = y0 \u003c= 0 && y1 >= 0 ? sy(0) : m.t + ph;\n      const ay = x0 \u003c= 0 && x1 >= 0 ? sx(0) : m.l;\n      svg('line', { x1: m.l, x2: m.l + pw, y1: ax, y2: ax, class: 'dk-axis' }, g);\n      svg('line', { x1: ay, x2: ay, y1: m.t, y2: m.t + ph, class: 'dk-axis' }, g);\n      if (o.xLabel) svg('text', { x: m.l + pw, y: H - 6, class: 'ts', 'text-anchor': 'end', text: o.xLabel }, g);\n      if (o.yLabel) svg('text', { x: m.l - 8, y: 12, class: 'ts', text: o.yLabel }, g);\n\n      api = { svg: root, sx, sy, ix, x: [x0, x1], y: [y0, y1], plot: { x: m.l, y: m.t, w: pw, h: ph }, clip: 'url(#dk-clip-' + uid + ')', color, el: (t, a, p) => svg(t, a, p) };\n\n      // series\n      const sg = svg('g', { 'clip-path': api.clip }, root);\n      const ends = [];\n      o.series.forEach((s, i) => {\n        const c = s.color || color(i + 1);\n        const pts = s.points || sample(s.fn, x0, x1, Math.max(60, Math.round(pw / 2)));\n        let d = '', pen = false, area = '';\n        for (const [x, y] of pts) {\n          if (!isFinite(y) || Math.abs(y - (y0 + y1) / 2) > (y1 - y0) * 20) { pen = false; continue; }\n          d += (pen ? 'L' : 'M') + sx(x).toFixed(1) + ',' + sy(y).toFixed(1);\n          pen = true;\n        }\n        if (s.area) {\n          const base = sy(Math.max(y0, Math.min(y1, 0)));\n          const fin = pts.filter(([, y]) => isFinite(y));\n          if (fin.length) area = `M${sx(fin[0][0])},${base}` + fin.map(([x, y]) => `L${sx(x).toFixed(1)},${sy(y).toFixed(1)}`).join('') + `L${sx(fin[fin.length - 1][0])},${base}Z`;\n          svg('path', { d: area, class: 'dk-area', fill: c }, sg);\n        }\n        if (!s.dotsOnly) svg('path', { d, class: 'dk-line', stroke: c, 'stroke-dasharray': s.dashed ? '6 5' : null }, sg);\n        if (s.points && (s.dots || s.dotsOnly)) for (const [x, y] of pts) svg('circle', { cx: sx(x), cy: sy(y), r: 4, class: 'dk-dot', fill: c }, sg);\n        if (s.endLabel) {\n          const last = [...pts].reverse().find(([, y]) => isFinite(y) && y >= y0 && y \u003c= y1);\n          if (last) ends.push({ y: sy(last[1]), x: sx(last[0]), label: s.label, c });\n        }\n      });\n      // end labels: nudge apart only a little; leader line keeps them attached\n      ends.sort((a, b) => a.y - b.y);\n      for (let k = 1; k \u003c ends.length; k++) if (ends[k].y - ends[k - 1].y \u003c 15) ends[k].ly = (ends[k - 1].ly ?? ends[k - 1].y) + 15;\n      for (const e of ends) {\n        const ly = e.ly ?? e.y;\n        if (Math.abs(ly - e.y) > 2) svg('path', { d: `M${e.x + 3},${e.y} L${e.x + 8},${ly}`, class: 'leader' }, root);\n        svg('text', { x: e.x + 10, y: ly, class: 'ts', 'dominant-baseline': 'central', text: e.label }, root);\n      }\n\n      if (o.marks) o.marks(svg('g', null, root), api);\n\n      // hover layer\n      const hg = svg('g', { 'pointer-events': 'none' }, root);\n      api.hoverLayer = hg;\n      if (hoverX != null) drawHover(hoverX);\n    }\n\n    function valueAt(s, x) {\n      if (s.fn) return s.fn(x);\n      let best = null;\n      for (const p of s.points) if (!best || Math.abs(p[0] - x) \u003c Math.abs(best[0] - x)) best = p;\n      return best ? best[1] : NaN;\n    }\n\n    function snapX(x) {\n      const pts = o.series.filter((s) => s.points).flatMap((s) => s.points.map((p) => p[0]));\n      if (!pts.length || o.series.some((s) => s.fn)) return x;\n      return pts.reduce((a, b) => (Math.abs(b - x) \u003c Math.abs(a - x) ? b : a));\n    }\n\n    function drawHover(x) {\n      const hg = api.hoverLayer;\n      hg.textContent = '';\n      tip.hidden = true;\n      if (x == null || !o.hover) return;\n      const { sx, sy, plot: P } = api;\n      const px = sx(x);\n      svg('line', { x1: px, x2: px, y1: P.y, y2: P.y + P.h, class: 'dk-crosshair' }, hg);\n      const rows = [];\n      o.series.forEach((s, i) => {\n        if (s.hover === false) return;\n        const c = s.color || color(i + 1);\n        const y = valueAt(s, x);\n        if (!isFinite(y)) return;\n        if (y >= api.y[0] && y \u003c= api.y[1]) svg('circle', { cx: px, cy: sy(y), r: 4.5, class: 'dk-dot', fill: c }, hg);\n        rows.push({ label: s.label || 'y', value: (o.yFormat || fmt)(y), color: c, dashed: s.dashed });\n      });\n      const custom = o.tooltip ? o.tooltip(x) : null;\n      const title = custom && custom.title != null ? custom.title : (o.xLabel ? o.xLabel + ' ' : 'x = ') + (o.hoverXFormat || o.xFormat || fmt)(x);\n      const list = custom && custom.rows ? custom.rows : rows;\n      tip.textContent = '';\n      tip.append(h('div', { class: 'dk-tip-head', text: title }));\n      for (const r of list) {\n        const key = h('i', { class: r.dashed ? 'dk-key-dash' : 'dk-key-line' });\n        key.style.color = r.color || INK.secondary;\n        tip.append(h('div', { class: 'dk-tip-row' }, key, h('span', { text: r.label }), h('span', { class: 'dk-value', text: r.value })));\n      }\n      tip.hidden = false;\n      const W = el.clientWidth;\n      const tw = tip.offsetWidth;\n      tip.style.left = (px + 14 + tw > W ? px - 14 - tw : px + 14) + 'px';\n      tip.style.top = (P.y + 4) + 'px';\n    }\n\n    root.addEventListener('pointermove', (e) => {\n      if (!api) return;\n      const r = root.getBoundingClientRect();\n      const px = e.clientX - r.left;\n      const P = api.plot;\n      if (px \u003c P.x || px > P.x + P.w || e.clientY - r.top \u003c P.y - 10 || e.clientY - r.top > P.y + P.h + 10) { hoverX = null; drawHover(null); if (o.onHover) o.onHover(null, api); return; }\n      hoverX = snapX(api.ix(px));\n      drawHover(hoverX);\n      if (o.onHover) o.onHover(hoverX, api);\n    });\n    root.addEventListener('pointerleave', () => { hoverX = null; drawHover(null); if (o.onHover) o.onHover(null, api); });\n\n    draw();\n    if (window.ResizeObserver) new ResizeObserver(() => draw()).observe(el);\n    return {\n      update(partial) { o = Object.assign(o, partial); draw(); },\n      redraw: draw,\n      get api() { return api; },\n    };\n  }\n\n  window.DK = { svg, h, color, fmt, ticks, slider, segmented, toggle, legend, stepper, arrowDefs, plot, INK, SERIES };\n})();\n\n\u003c/script>\r\n\u003cscript>\r\n  const TOP = 14, UNIT = 16, CAP = 10;          // stack holds CAP small frames below main\r\n  const MAIN_H = 18, LIMIT_Y = TOP + MAIN_H + CAP * UNIT;\r\n  const X = 150, W = 170;\r\n\r\n  let depth = 4, big = false;\r\n  const controls = document.getElementById('controls');\r\n  DK.slider(controls, { label: 'Recursion depth', min: 1, max: 14, step: 1, value: depth, format: (v) => v + ' calls', onInput: (v) => { depth = v; draw(); } });\r\n  DK.toggle(controls, { label: 'Big local array in each call', checked: big, onChange: (v) => { big = v; draw(); } });\r\n\r\n  const svg = document.getElementById('stack');\r\n  const arrow = DK.arrowDefs(svg, 'ptr', DK.INK.secondary);\r\n  const layer = DK.svg('g', null, svg);\r\n\r\n  function box(g, cls, y, h, title) {\r\n    const grp = DK.svg('g', { class: cls }, g);\r\n    DK.svg('rect', { x: X, y, width: W, height: h - 2, rx: 4 }, grp);\r\n    if (title) DK.svg('text', { x: X + W / 2, y: y + (h - 2) / 2, class: h > 20 ? 'ts' : 'tm', 'text-anchor': 'middle', 'dominant-baseline': 'central', text: title }, grp);\r\n    return grp;\r\n  }\r\n\r\n  function draw() {\r\n    layer.textContent = '';\r\n    const fh = (big ? 3 : 1) * UNIT;\r\n    DK.svg('text', { x: X, y: 6, class: 'tm', 'dominant-baseline': 'central', text: 'high addresses' }, layer);\r\n    box(layer, 'c-gray', TOP, MAIN_H, 'main');\r\n\r\n    // stack limit, guard page and heap below it\r\n    DK.svg('line', { x1: X - 20, x2: X + W + 20, y1: LIMIT_Y, y2: LIMIT_Y, class: 'limit' }, layer);\r\n    DK.svg('text', { x: X + W + 26, y: LIMIT_Y, class: 'lim-label', 'dominant-baseline': 'central', text: 'stack limit' }, layer);\r\n    box(layer, 'c-gray', LIMIT_Y + 28, 22, 'heap');\r\n\r\n    // push frames until one would cross the limit: that call lands in the guard page and crashes\r\n    let y = TOP + MAIN_H, crashAt = null;\r\n    for (let k = 1; k \u003c= depth; k++) {\r\n      if (y + fh > LIMIT_Y) { crashAt = k; break; }\r\n      box(layer, 'c-teal', y, fh, (fh > UNIT ? 'f(' + k + ') + buf' : 'f(' + k + ')'));\r\n      y += fh;\r\n    }\r\n    if (crashAt) {\r\n      box(layer, 'c-red', LIMIT_Y + 4, 18, 'f(' + crashAt + ') hits the guard page');\r\n      y = LIMIT_Y + 22;\r\n    } else {\r\n      box(layer, 'c-gray', LIMIT_Y + 4, 18, 'guard page (no access)');\r\n    }\r\n\r\n    // rsp: bottom edge of the newest frame\r\n    const ry = Math.min(y, 244);\r\n    DK.svg('text', { x: 64, y: ry, class: 'tmono', 'dominant-baseline': 'central', text: 'rsp' }, layer);\r\n    DK.svg('line', { x1: 94, y1: ry, x2: X - 6, y2: ry, class: 'arr', 'marker-end': arrow }, layer);\r\n    DK.svg('text', { x: X + W + 26, y: TOP + 9, class: 'tm', 'dominant-baseline': 'central', text: 'grows ↓' }, layer);\r\n\r\n    const used = depth * fh / UNIT;\r\n    const ro = document.getElementById('readout');\r\n    if (crashAt) {\r\n      ro.innerHTML = 'Call ' + crashAt + ': \u003cb>rsp\u003c/b> passes the stack limit → \u003cb class=\"dk-mark\">segmentation fault\u003c/b> (crash).';\r\n    } else {\r\n      const left = Math.floor((CAP - used) / (fh / UNIT));\r\n      ro.innerHTML = depth + ' frames on the stack. Room for \u003cb>' + left + '\u003c/b> more ' + (left === 1 ? 'call' : 'calls') + ' before \u003cb>rsp\u003c/b> hits the limit.';\r\n    }\r\n  }\r\n  draw();\r\n\u003c/script>\r\n\u003c/body>\r\n\u003c/html>\r\n"},"exportedAt":"2026-10-24T12:23:37.621Z"}</script>
+<script>
+/*
+ * Whiteboard engine: renders a board (board.json) and lets you edit it.
+ * No dependencies. Works in two modes:
+ *   dev        - served by server.mjs; every change is saved to board.json,
+ *                and edits Claude makes to board.json appear live.
+ *   standalone - an exported single HTML file; "Save copy" writes a new HTML file.
+ */
+(function () {
+  'use strict';
+
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const GRID = 20, SNAP = 10;
+  const BOX_TYPES = new Set(['text', 'picture', 'diagram']);
+  const VARIANTS = [['card', 'Card'], ['note', 'Sticky note'], ['title', 'Title'], ['heading', 'Heading'], ['bare', 'Plain text']];
+  const COLORS = ['none', 'yellow', 'green', 'blue', 'pink', 'gray'];
+  const SIDES = ['left', 'right', 'top', 'bottom'];
+
+  const ICON = {
+    select: 'M6 3.5l12 7.2-5.3 1.6-2.4 5.2z',
+    text: 'M5 7V5h14v2M12 5v14M9 19h6',
+    arrow: 'M4 12h15M14 7l5 5-5 5',
+    brace: 'M14 4c-2 0-3 1-3 3v2c0 2-1 3-3 3 2 0 3 1 3 3v2c0 2 1 3 3 3',
+    picture: 'M4 5h16v14H4zM4 16l5-5 4 4 2-2 5 5M15.5 9.5h.01',
+    diagram: 'M4 19V9M10 19V5M16 19v-7M3 19h18',
+    undo: 'M9 5L4 10l5 5M4 10h10a5 5 0 0 1 0 10h-4',
+    redo: 'M15 5l5 5-5 5M20 10H10a5 5 0 0 0 0 10h4',
+    fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+    help: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5h.01',
+    export: 'M12 4v11M7 10l5 5 5-5M5 20h14',
+    trash: 'M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13',
+    close: 'M6 6l12 12M18 6L6 18',
+    side_left: 'M14 4c-2 0-3 1-3 3v2c0 2-1 3-3 3 2 0 3 1 3 3v2c0 2 1 3 3 3',
+    side_right: 'M10 4c2 0 3 1 3 3v2c0 2 1 3 3 3-2 0-3 1-3 3v2c0 2-1 3-3 3',
+    side_top: 'M4 14c0-2 1-3 3-3h2c2 0 3-1 3-3 0 2 1 3 3 3h2c2 0 3 1 3 3',
+    side_bottom: 'M4 10c0 2 1 3 3 3h2c2 0 3 1 3 3 0-2 1-3 3-3h2c2 0 3-1 3-3',
+  };
+
+  const WB = (window.WB = {});
+  let cfg = null, board = null, rev = 0;
+  let assets = {}, diagrams = {}, pristine = '';
+  const view = { x: 0, y: 0, z: 1 };
+  let selected = new Set();
+  let tool = 'select';
+  let draftStyle = 'sequence';
+  let undoStack = [], redoStack = [];
+  let saveState = 'saved', saveMessage = '';
+  let saveTimer = null, saving = false, saveQueued = false;
+  let editing = null, editSnapshot = null, editIsNew = false;
+  let gesture = null;
+  let pendingRemote = false;
+  let arrowDraft = null;
+  let labelCtx = null;
+  let spaceDown = false;
+  let ready = false;
+  let ro = null, linkFrame = 0, viewTimer = null, toastTimer = null;
+  const nodes = new Map();
+  const braceCache = new Map();
+  const bust = {};
+  const ui = {};
+
+  /* ---------------- helpers ---------------- */
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const k in attrs || {}) {
+      const v = attrs[k];
+      if (v == null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'text') el.textContent = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids) if (kid != null) el.append(kid);
+    return el;
+  }
+  function s(tag, attrs) {
+    const el = document.createElementNS(SVGNS, tag);
+    for (const k in attrs || {}) if (attrs[k] != null) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+  function icon(name) {
+    const svg = s('svg', { viewBox: '0 0 24 24', class: 'wb-ico', 'aria-hidden': 'true' });
+    svg.append(s('path', { d: ICON[name] }));
+    return svg;
+  }
+  const byId = (id) => board.elements.find((e) => e.id === id);
+  const isBox = (e) => !!e && BOX_TYPES.has(e.type);
+  const snap = (v, step = SNAP) => Math.round(v / step) * step;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const enc = encodeURIComponent;
+  function uid(prefix) {
+    let id;
+    do id = prefix + '-' + Math.random().toString(36).slice(2, 6); while (byId(id));
+    return id;
+  }
+  function storage(key, val) {
+    try {
+      if (val === undefined) return localStorage.getItem(key);
+      localStorage.setItem(key, val);
+    } catch (e) { /* storage unavailable: views just are not remembered */ }
+    return null;
+  }
+  function single() { return selected.size === 1 ? byId([...selected][0]) : null; }
+
+  function normalize(b) {
+    if (!b || typeof b !== 'object') b = {};
+    if (!Array.isArray(b.elements)) b.elements = [];
+    const seen = new Set();
+    b.elements = b.elements.filter((e) => e && typeof e === 'object' && typeof e.type === 'string');
+    for (const e of b.elements) {
+      if (typeof e.id !== 'string' || !e.id || seen.has(e.id)) e.id = e.type + '-' + Math.random().toString(36).slice(2, 6);
+      seen.add(e.id);
+      if (isBox(e)) { e.x = Number(e.x) || 0; e.y = Number(e.y) || 0; }
+      if (e.type === 'text') { if (!e.w) e.w = 220; if (e.text == null) e.text = ''; }
+      if (e.type === 'picture') { e.w = e.w || 240; e.h = e.h || 180; }
+      if (e.type === 'diagram') { e.w = e.w || 420; e.h = e.h || 300; }
+      if (e.type === 'arrow' && e.style !== 'equivalence') e.style = 'sequence';
+      if (e.type === 'brace') { if (!Array.isArray(e.members)) e.members = []; if (!SIDES.includes(e.side)) e.side = 'right'; }
+    }
+    return b;
+  }
+
+  function assetURL(src) {
+    if (!src) return '';
+    if (/^(https?:|data:|blob:)/.test(src)) return src;
+    if (cfg.mode === 'standalone') return assets[src] || src;
+    return '/boards/' + enc(cfg.board) + '/' + src.split('/').map(enc).join('/') + (bust[src] ? '?v=' + bust[src] : '');
+  }
+
+  function richText(t) {
+    let out = esc(t || '');
+    out = out.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    return out.split('\n').map((line) => line.replace(/^(\s*)- /, '$1• ')).join('\n');
+  }
+
+  /* ---------------- boot ---------------- */
+  WB.boot = async function (opts) {
+    cfg = Object.assign({ mode: 'dev' }, opts);
+    if (cfg.mode === 'standalone') {
+      pristine = '<!doctype html>\n' + document.documentElement.outerHTML;
+      const data = JSON.parse(document.getElementById('wb-data').textContent);
+      board = data.board; assets = data.assets || {}; diagrams = data.diagrams || {};
+      saveState = 'standalone';
+    } else {
+      const r = await fetch('/api/board/' + enc(cfg.board));
+      if (!r.ok) { document.body.textContent = 'Could not load board "' + cfg.board + '": ' + (await r.text()); return; }
+      const j = await r.json();
+      board = j.board; rev = j.rev;
+    }
+    normalize(board);
+    document.title = board.title || cfg.board || 'Whiteboard';
+    if (window.ResizeObserver) ro = new ResizeObserver(() => scheduleLinks());
+    buildUI();
+    render();
+    const saved = storage('wb-view:' + (cfg.board || board.title));
+    let restored = false;
+    if (saved) { try { Object.assign(view, JSON.parse(saved)); restored = true; } catch (e) { /* ignore */ } }
+    if (restored) applyView(); else fit();
+    if (cfg.mode === 'dev') connectEvents();
+    window.addEventListener('beforeunload', (ev) => {
+      if (cfg.mode === 'standalone' && saveState === 'unsaved') { ev.preventDefault(); ev.returnValue = ''; }
+      if (cfg.mode === 'dev' && (saveTimer || saving)) { ev.preventDefault(); ev.returnValue = ''; }
+    });
+    ready = true;
+  };
+  WB.isReady = () => ready;
+  WB.getBoard = () => JSON.parse(JSON.stringify(board));
+
+  /* ---------------- UI scaffold ---------------- */
+  function buildUI() {
+    const root = document.getElementById('wb-root');
+    root.textContent = '';
+    ui.stage = h('div', { class: 'wb-stage', tabindex: '-1' });
+    ui.world = h('div', { class: 'wb-world' });
+    ui.boxes = h('div', { class: 'wb-boxes' });
+    ui.svg = s('svg', { class: 'wb-links', width: '1', height: '1' });        // arrows + braces, under the boxes
+    ui.overlay = s('svg', { class: 'wb-links', width: '1', height: '1' });    // handles + arrow draft, on top
+    ui.world.append(ui.svg, ui.boxes, ui.overlay);
+    ui.marquee = h('div', { class: 'wb-marquee', hidden: true });
+    ui.stage.append(ui.world, ui.marquee);
+    ui.title = h('div', { class: 'wb-board-title' });
+    ui.status = h('div', { class: 'wb-status', role: 'status' });
+    ui.top = h('div', { class: 'wb-top' }, ui.title, ui.status);
+    ui.tray = h('div', { class: 'wb-tray', role: 'toolbar', 'aria-label': 'Whiteboard tools' });
+    ui.toast = h('div', { class: 'wb-toast', role: 'status', 'aria-live': 'polite' });
+    ui.help = buildHelp();
+    ui.file = h('input', { type: 'file', accept: 'image/*', multiple: true, hidden: true });
+    ui.file.addEventListener('change', () => { addImageFiles([...ui.file.files], centerPoint()); ui.file.value = ''; });
+    ui.editorInput = h('input', { type: 'text', 'aria-label': 'Label' });
+    ui.editor = h('div', { class: 'wb-label-editor', hidden: true }, ui.editorInput);
+    root.append(ui.stage, ui.top, ui.tray, ui.toast, ui.help, ui.file, ui.editor);
+    bindEvents();
+  }
+
+  function buildHelp() {
+    const rows = (pairs) => {
+      const dl = h('dl');
+      for (const [k, v] of pairs) dl.append(h('dt', null, ...k.split(' ').map((x) => h('kbd', { text: x }))), h('dd', { text: v }));
+      return dl;
+    };
+    const close = h('button', { class: 'wb-btn wb-icon wb-close', type: 'button', 'aria-label': 'Close shortcuts' }, icon('close'));
+    close.addEventListener('click', () => toggleHelp(false));
+    return h('div', { class: 'wb-help', hidden: true, role: 'dialog', 'aria-label': 'Shortcuts' }, close,
+      h('h2', { text: 'Shortcuts' }),
+      h('h3', { text: 'Tools' }),
+      rows([['V', 'Select and move'], ['T', 'Text box (or double-click empty space)'], ['A', 'Arrow: click or drag from one box to another'], ['B', 'Brace around the selected boxes'], ['P', 'Picture (you can also paste or drop images)']]),
+      h('h3', { text: 'Editing' }),
+      rows([['Enter', 'Edit the selected text or label'], ['Esc', 'Finish editing / clear selection'], ['S', 'Arrow: switch → and ⇒. Brace: move to next side'], ['Del', 'Delete selection'], ['Ctrl D', 'Duplicate boxes'], ['Ctrl Z', 'Undo'], ['Ctrl ⇧ Z', 'Redo'], ['Ctrl S', 'Save now / Save copy'], ['Shift', 'Hold while clicking to select several'], ['Alt', 'Hold while dragging to move off the grid']]),
+      h('h3', { text: 'Arrows and braces' }),
+      h('p', { text: 'Select an arrow, then drag its round end onto another box to re-point it. Drag the filled middle dot to bend it. Drag a brace to move its whole group. To change who is in a group, select the brace plus the boxes you want, then press B.' }),
+      h('h3', { text: 'View' }),
+      rows([['Space', 'Hold and drag to pan (or drag empty space)'], ['Ctrl+scroll', 'Zoom'], ['F', 'Fit the board on screen'], ['0', 'Zoom to 100%']]));
+  }
+
+  function toggleHelp(force) {
+    ui.help.hidden = force === undefined ? !ui.help.hidden : !force;
+  }
+
+  function btn(label, iconName, fn, o = {}) {
+    const b = h('button', { class: 'wb-btn', type: 'button', title: o.title || label, 'aria-pressed': o.pressed == null ? null : String(!!o.pressed) });
+    if (iconName) b.append(icon(iconName));
+    if (label) b.append(h('span', { class: o.keepLabel ? '' : 'wb-btn-label', text: label }));
+    if (!label) { b.classList.add('wb-icon'); b.setAttribute('aria-label', o.title || ''); }
+    if (o.disabled) b.disabled = true;
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); fn(); });
+    return b;
+  }
+  const sep = () => h('div', { class: 'wb-sep' });
+
+  function renderTray() {
+    const t = ui.tray;
+    t.textContent = '';
+    const tools = h('div', { class: 'wb-group' });
+    tools.append(
+      btn('Select', 'select', () => setTool('select'), { pressed: tool === 'select', title: 'Select and move (V)' }),
+      btn('Text', 'text', () => setTool('text'), { pressed: tool === 'text', title: 'Text box (T)' }),
+      btn('Arrow', 'arrow', () => setTool('arrow'), { pressed: tool === 'arrow', title: 'Arrow (A)' }),
+      btn('Brace', 'brace', braceFromSelection, { title: 'Brace around the selected boxes (B)' }),
+      btn('Picture', 'picture', () => ui.file.click(), { title: 'Add a picture (P). You can also paste or drop images.' }));
+    t.append(tools);
+    const ctx = contextControls();
+    if (ctx) t.append(sep(), ctx);
+    const misc = h('div', { class: 'wb-group' });
+    misc.append(
+      btn(null, 'undo', undo, { title: 'Undo (Ctrl+Z)', disabled: !undoStack.length }),
+      btn(null, 'redo', redo, { title: 'Redo (Ctrl+Shift+Z)', disabled: !redoStack.length }),
+      btn(null, 'fit', fit, { title: 'Fit board on screen (F)' }),
+      btn(null, 'help', () => toggleHelp(), { title: 'Shortcuts (?)' }));
+    if (cfg.mode === 'dev') misc.append(btn('Export HTML', 'export', exportHTML, { title: 'Write a standalone HTML file into this board’s exports folder' }));
+    else misc.append(btn('Save copy', 'export', saveCopy, { title: 'Save an HTML file with your changes (Ctrl+S)' }));
+    t.append(sep(), misc);
+  }
+
+  function contextControls() {
+    if (tool === 'arrow') {
+      const g = h('div', { class: 'wb-group' });
+      g.append(
+        btn('→ Sequence', null, () => { draftStyle = 'sequence'; renderTray(); }, { pressed: draftStyle === 'sequence', keepLabel: true }),
+        btn('⇒ Equivalence', null, () => { draftStyle = 'equivalence'; renderTray(); }, { pressed: draftStyle === 'equivalence', keepLabel: true }));
+      return g;
+    }
+    const sel = [...selected].map(byId).filter(Boolean);
+    if (!sel.length) return null;
+    const g = h('div', { class: 'wb-group' });
+    const types = new Set(sel.map((e) => e.type));
+    const only = (t) => types.size === 1 && types.has(t);
+    if (only('text')) {
+      const select = h('select', { class: 'wb-select', 'aria-label': 'Text style', title: 'Text style' });
+      for (const [k, name] of VARIANTS) select.append(h('option', { value: k, text: name, selected: (sel[0].variant || 'card') === k }));
+      select.addEventListener('change', () => mutate(() => sel.forEach((e) => { e.variant = select.value; })));
+      const sw = h('div', { class: 'wb-swatches' });
+      for (const c of COLORS) {
+        const b = h('button', { type: 'button', class: 'wb-swatch c-' + c, title: c === 'none' ? 'No color' : c[0].toUpperCase() + c.slice(1), 'aria-label': c === 'none' ? 'No color' : c, 'aria-pressed': String((sel[0].color || 'none') === c) });
+        b.addEventListener('click', () => mutate(() => sel.forEach((e) => { if (c === 'none') delete e.color; else e.color = c; })));
+        sw.append(b);
+      }
+      g.append(select, sw);
+    }
+    if (only('arrow')) {
+      const st = sel[0].style;
+      g.append(
+        btn('→ Sequence', null, () => mutate(() => sel.forEach((e) => { e.style = 'sequence'; })), { pressed: st === 'sequence', keepLabel: true, title: 'Sequence arrow: this leads to that' }),
+        btn('⇒ Equivalence', null, () => mutate(() => sel.forEach((e) => { e.style = 'equivalence'; })), { pressed: st === 'equivalence', keepLabel: true, title: 'Equivalence arrow: this is the same as that' }));
+      if (sel.length === 1) {
+        g.append(btn('Label', null, () => editLabel(sel[0]), { keepLabel: true }));
+        if (sel[0].curve) g.append(btn('Straighten', null, () => mutate(() => { delete sel[0].curve; }), { keepLabel: true }));
+      }
+    }
+    if (only('brace') && sel.length === 1) {
+      const b = sel[0];
+      for (const sd of SIDES) g.append(btn(null, 'side_' + sd, () => mutate(() => { b.side = sd; }), { pressed: b.side === sd, title: 'Brace on the ' + sd }));
+      g.append(btn('Label', null, () => editLabel(b), { keepLabel: true }));
+    }
+    if (types.has('brace') && sel.some(isBox) && sel.filter((e) => e.type === 'brace').length === 1) {
+      g.append(btn('Set group', null, braceFromSelection, { keepLabel: true, title: 'Make the brace group exactly the selected boxes (B)' }));
+    }
+    if (sel.length === 1 && sel[0].type === 'picture') g.append(btn('Caption', null, () => editLabel(sel[0]), { keepLabel: true }));
+    if (sel.length === 1 && sel[0].type === 'diagram') {
+      g.append(btn('Title', null, () => editLabel(sel[0]), { keepLabel: true }));
+      if (cfg.mode === 'dev') g.append(btn('Reload', null, () => reloadDiagram(sel[0].src), { keepLabel: true }));
+    }
+    g.append(btn(null, 'trash', deleteSelection, { title: 'Delete (Del)' }));
+    return g;
+  }
+
+  function setTool(t) {
+    if (tool === t) return;
+    tool = t;
+    if (t !== 'arrow') arrowDraft = null;
+    ui.stage.classList.toggle('tool-text', t === 'text');
+    ui.stage.classList.toggle('tool-arrow', t === 'arrow');
+    renderTray();
+    renderLinks();
+  }
+
+  /* ---------------- rendering ---------------- */
+  function render() {
+    renderBoxes();
+    renderLinks();
+    renderTray();
+    renderStatus();
+    ui.title.textContent = board.title || cfg.board || 'Whiteboard';
+    document.documentElement.dataset.theme = board.theme === 'minimal' ? 'minimal' : 'marker';
+  }
+
+  function boxSig(e) { return JSON.stringify([e.type, e.text, e.variant, e.color, e.src, e.caption, e.title, bust[e.src] || 0]); }
+
+  function renderBoxes() {
+    const seen = new Set();
+    const memberOf = new Set();
+    for (const id of selected) { const b = byId(id); if (b && b.type === 'brace') b.members.forEach((m) => memberOf.add(m)); }
+    for (const e of board.elements) {
+      if (!isBox(e)) continue;
+      seen.add(e.id);
+      let n = nodes.get(e.id);
+      const sig = boxSig(e);
+      if (!n || (n.sig !== sig && editing !== e.id)) {
+        const el = createBox(e);
+        if (n) { if (ro) ro.unobserve(n.el); n.el.replaceWith(el); } else ui.boxes.append(el);
+        n = { el, sig };
+        nodes.set(e.id, n);
+      }
+      placeBox(n.el, e);
+      n.el.classList.toggle('is-selected', selected.has(e.id));
+      n.el.classList.toggle('is-member', memberOf.has(e.id) && !selected.has(e.id));
+    }
+    for (const [id, n] of nodes) if (!seen.has(id)) { if (ro) ro.unobserve(n.el); n.el.remove(); nodes.delete(id); }
+    // keep DOM order equal to array order (later elements on top)
+    let prev = null;
+    for (const e of board.elements) {
+      const n = nodes.get(e.id);
+      if (!n) continue;
+      const want = prev ? prev.nextSibling : ui.boxes.firstChild;
+      if (want !== n.el) ui.boxes.insertBefore(n.el, want);
+      prev = n.el;
+    }
+  }
+
+  function createBox(e) {
+    const el = h('div', { class: 'wb-box t-' + e.type, 'data-id': e.id });
+    if (e.type === 'text') {
+      el.classList.add('v-' + (e.variant || 'card'));
+      if (e.color) el.classList.add('c-' + e.color);
+      const t = h('div', { class: 'wb-txt' });
+      t.innerHTML = richText(e.text);
+      el.append(t);
+    } else if (e.type === 'picture') {
+      const img = h('img', { src: assetURL(e.src), alt: e.caption || '', draggable: 'false' });
+      img.addEventListener('error', () => el.classList.add('is-broken'));
+      img.addEventListener('load', () => el.classList.remove('is-broken'));
+      el.append(h('div', { class: 'wb-pic' }, img, h('span', { class: 'wb-broken-msg', text: 'Picture not found: ' + e.src })));
+      if (e.caption) el.append(h('div', { class: 'wb-caption', text: e.caption }));
+    } else if (e.type === 'diagram') {
+      const head = h('div', { class: 'wb-dhead', title: 'Drag here to move' }, icon('diagram'), h('span', { text: e.title || 'Diagram' }));
+      const frame = h('iframe', { sandbox: 'allow-scripts allow-popups', title: e.title || 'Diagram' });
+      if (cfg.mode === 'standalone') frame.srcdoc = diagrams[e.src] || missingDiagram(e.src);
+      else frame.src = assetURL(e.src);
+      el.append(head, h('div', { class: 'wb-dbody' }, frame));
+    }
+    el.append(h('div', { class: 'wb-resize', 'data-handle': 'resize', title: 'Drag to resize' }));
+    if (ro) ro.observe(el);
+    return el;
+  }
+
+  function missingDiagram(src) {
+    return '<body style="font:13px system-ui;color:#C23A3A;display:grid;place-items:center;height:90vh;margin:0">Diagram not found: ' + esc(src || '(no src)') + '</body>';
+  }
+
+  function placeBox(el, e) {
+    el.style.left = e.x + 'px';
+    el.style.top = e.y + 'px';
+    el.style.width = e.w + 'px';
+    if (e.type === 'text') { el.style.height = ''; el.style.minHeight = e.h ? e.h + 'px' : ''; }
+    else el.style.height = e.h + 'px';
+  }
+
+  function rectOf(e) {
+    const n = nodes.get(e.id);
+    const w = n ? n.el.offsetWidth : e.w;
+    const hh = e.type === 'text' ? (n ? n.el.offsetHeight : (e.h || 40)) : e.h;
+    return { x: e.x, y: e.y, w, h: hh };
+  }
+
+  function scheduleLinks() {
+    if (linkFrame) return;
+    linkFrame = requestAnimationFrame(() => { linkFrame = 0; renderLinks(); });
+  }
+
+  function anchor(ref) {
+    if (ref && typeof ref === 'object') return { pt: { x: +ref.x || 0, y: +ref.y || 0 }, gap: 0 };
+    const e = typeof ref === 'string' ? byId(ref) : null;
+    if (!e) return null;
+    if (e.type === 'brace') {
+      const g = braceCache.get(e.id);
+      return g ? { pt: g.tip, gap: 6 } : null;
+    }
+    if (!isBox(e)) return null;
+    const r = rectOf(e);
+    return { rect: r, pt: { x: r.x + r.w / 2, y: r.y + r.h / 2 } };
+  }
+
+  function clipTo(A, toward) {
+    let dx = toward.x - A.pt.x, dy = toward.y - A.pt.y;
+    const L = Math.hypot(dx, dy) || 1;
+    dx /= L; dy /= L;
+    let k;
+    if (A.rect) {
+      const tx = dx ? (A.rect.w / 2) / Math.abs(dx) : Infinity;
+      const ty = dy ? (A.rect.h / 2) / Math.abs(dy) : Infinity;
+      k = Math.min(tx, ty) + 7;
+    } else k = A.gap || 0;
+    return { x: A.pt.x + dx * k, y: A.pt.y + dy * k };
+  }
+
+  function endRef(e, which) {
+    if (gesture && gesture.kind === 'arrowEnd' && gesture.id === e.id && gesture.which === which && gesture.pt) return gesture.pt;
+    return e[which];
+  }
+
+  function arrowGeom(e) {
+    const A = anchor(endRef(e, 'from')), B = anchor(endRef(e, 'to'));
+    if (!A || !B) return null;
+    const ca = A.pt, cb = B.pt;
+    const dx = cb.x - ca.x, dy = cb.y - ca.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const n = { x: -dy / len, y: dx / len };
+    const mid = { x: (ca.x + cb.x) / 2, y: (ca.y + cb.y) / 2 };
+    const curve = Number(e.curve) || 0;
+    const c = { x: mid.x + n.x * curve, y: mid.y + n.y * curve };
+    const st = clipTo(A, curve ? c : cb), en = clipTo(B, curve ? c : ca);
+    const cc = curve ? c : { x: (st.x + en.x) / 2, y: (st.y + en.y) / 2 };
+    return { s: st, t: en, c: cc, n, mid, curved: !!curve };
+  }
+
+  function qpt(G, k) {
+    const a = (1 - k) * (1 - k), b = 2 * (1 - k) * k, c = k * k;
+    return { x: a * G.s.x + b * G.c.x + c * G.t.x, y: a * G.s.y + b * G.c.y + c * G.t.y };
+  }
+
+  function curly(p1, p2, w, q) {
+    let dx = p1.x - p2.x, dy = p1.y - p2.y;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len; dy /= len;
+    const qx1 = p1.x + q * w * dy, qy1 = p1.y - q * w * dx;
+    const qx2 = p1.x - 0.25 * len * dx + (1 - q) * w * dy, qy2 = p1.y - 0.25 * len * dy - (1 - q) * w * dx;
+    const tx = p1.x - 0.5 * len * dx + w * dy, ty = p1.y - 0.5 * len * dy - w * dx;
+    const qx3 = p2.x + q * w * dy, qy3 = p2.y - q * w * dx;
+    const qx4 = p1.x - 0.75 * len * dx + (1 - q) * w * dy, qy4 = p1.y - 0.75 * len * dy - (1 - q) * w * dx;
+    const f = (v) => Math.round(v * 10) / 10;
+    return {
+      d: `M${f(p1.x)},${f(p1.y)} Q${f(qx1)},${f(qy1)} ${f(qx2)},${f(qy2)} T${f(tx)},${f(ty)} M${f(p2.x)},${f(p2.y)} Q${f(qx3)},${f(qy3)} ${f(qx4)},${f(qy4)} T${f(tx)},${f(ty)}`,
+      tip: { x: tx, y: ty },
+    };
+  }
+
+  function braceGeom(e) {
+    const rs = e.members.map(byId).filter(isBox).map(rectOf);
+    if (!rs.length) return null;
+    const x1 = Math.min(...rs.map((r) => r.x)), y1 = Math.min(...rs.map((r) => r.y));
+    const x2 = Math.max(...rs.map((r) => r.x + r.w)), y2 = Math.max(...rs.map((r) => r.y + r.h));
+    const gap = 12;
+    let p1, p2, out;
+    if (e.side === 'left') { const x = x1 - gap; p1 = { x, y: y1 }; p2 = { x, y: y2 }; out = { x: -1, y: 0 }; }
+    else if (e.side === 'top') { const y = y1 - gap; p1 = { x: x2, y }; p2 = { x: x1, y }; out = { x: 0, y: -1 }; }
+    else if (e.side === 'bottom') { const y = y2 + gap; p1 = { x: x1, y }; p2 = { x: x2, y }; out = { x: 0, y: 1 }; }
+    else { const x = x2 + gap; p1 = { x, y: y2 }; p2 = { x, y: y1 }; out = { x: 1, y: 0 }; }
+    const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const depth = clamp(len * 0.07, 9, 20);
+    const c = curly(p1, p2, depth, 0.6);
+    return { d: c.d, tip: c.tip, out, p1, p2, depth, bbox: { x1, y1, x2, y2 } };
+  }
+
+  function renderLinks() {
+    const svg = ui.svg;
+    svg.textContent = '';
+    ui.overlay.textContent = '';
+    braceCache.clear();
+    const gB = s('g'), gA = s('g'), gH = s('g');
+    for (const e of board.elements) {
+      if (e.type !== 'brace') continue;
+      const g = braceGeom(e);
+      if (!g) continue;
+      braceCache.set(e.id, g);
+      drawBrace(gB, e, g);
+    }
+    for (const e of board.elements) {
+      if (e.type !== 'arrow') continue;
+      const G = arrowGeom(e);
+      if (G) drawArrow(gA, e, G);
+    }
+    if (arrowDraft) drawDraft(gH);
+    const one = single();
+    if (one && one.type === 'arrow' && !editing) {
+      const G = arrowGeom(one);
+      if (G) {
+        const m = qpt(G, 0.5);
+        gH.append(
+          s('circle', { cx: G.s.x, cy: G.s.y, r: 6, class: 'wb-handle', 'data-handle': 'from' }),
+          s('circle', { cx: G.t.x, cy: G.t.y, r: 6, class: 'wb-handle', 'data-handle': 'to' }),
+          s('circle', { cx: m.x, cy: m.y, r: 4.5, class: 'wb-handle mid', 'data-handle': 'mid' }));
+      }
+    }
+    svg.append(gB, gA);
+    ui.overlay.append(gH);
+  }
+
+  function drawBrace(g, e, G) {
+    const grp = s('g', { class: 'wb-brace' + (selected.has(e.id) ? ' is-selected' : ''), 'data-link': e.id });
+    grp.append(s('path', { d: G.d, class: 'wb-brace-path' }), s('path', { d: G.d, class: 'wb-hit' }));
+    if (e.label) {
+      const o = G.out, off = 10;
+      const attrs = { x: G.tip.x + o.x * off, y: G.tip.y + o.y * off, class: 'wb-brace-label' };
+      if (o.x > 0) Object.assign(attrs, { 'text-anchor': 'start', 'dominant-baseline': 'central' });
+      else if (o.x < 0) Object.assign(attrs, { 'text-anchor': 'end', 'dominant-baseline': 'central' });
+      else if (o.y < 0) Object.assign(attrs, { 'text-anchor': 'middle', 'dominant-baseline': 'auto' });
+      else Object.assign(attrs, { 'text-anchor': 'middle', 'dominant-baseline': 'hanging' });
+      const t = s('text', attrs);
+      t.textContent = e.label;
+      grp.append(t);
+    }
+    g.append(grp);
+  }
+
+  function drawArrow(g, e, G) {
+    const { s: st, t, c } = G;
+    let ux = t.x - c.x, uy = t.y - c.y;
+    const L = Math.hypot(ux, uy) || 1;
+    ux /= L; uy /= L;
+    const nx = -uy, ny = ux;
+    const eq = e.style === 'equivalence';
+    const back = eq ? 5 : (board.theme === 'minimal' ? 1 : 9);
+    const te = { x: t.x - ux * back, y: t.y - uy * back };
+    const f = (v) => Math.round(v * 10) / 10;
+    const body = G.curved ? `M${f(st.x)},${f(st.y)} Q${f(c.x)},${f(c.y)} ${f(te.x)},${f(te.y)}` : `M${f(st.x)},${f(st.y)} L${f(te.x)},${f(te.y)}`;
+    const full = G.curved ? `M${f(st.x)},${f(st.y)} Q${f(c.x)},${f(c.y)} ${f(t.x)},${f(t.y)}` : `M${f(st.x)},${f(st.y)} L${f(t.x)},${f(t.y)}`;
+    const grp = s('g', { class: 'wb-arrow' + (selected.has(e.id) ? ' is-selected' : ''), 'data-link': e.id });
+    if (eq) {
+      const hw = 8.5, hl = 12;
+      grp.append(
+        s('path', { d: body, class: 'wb-stroke-outer' }),
+        s('path', { d: body, class: 'wb-stroke-inner' }),
+        s('path', { class: 'wb-head-open', d: `M${f(t.x - ux * hl + nx * hw)},${f(t.y - uy * hl + ny * hw)} L${f(t.x)},${f(t.y)} L${f(t.x - ux * hl - nx * hw)},${f(t.y - uy * hl - ny * hw)}` }));
+    } else {
+      const hw = 5.5, hl = 11;
+      grp.append(
+        s('path', { d: body, class: 'wb-stroke' }),
+        s('path', { class: 'wb-head', d: `M${f(t.x - ux * hl + nx * hw)},${f(t.y - uy * hl + ny * hw)} L${f(t.x)},${f(t.y)} L${f(t.x - ux * hl - nx * hw)},${f(t.y - uy * hl - ny * hw)}` }));
+    }
+    grp.append(s('path', { d: full, class: 'wb-hit' }));
+    if (e.label) {
+      // Put the label beside the line: above a mostly-horizontal arrow, right of a mostly-vertical one,
+      // or on the outside of the bend for a curved arrow.
+      const m = qpt(G, 0.5);
+      let ox = G.n.x, oy = G.n.y;
+      if (G.curved) { const sg = Math.sign(Number(e.curve)) || 1; ox *= sg; oy *= sg; }
+      else if (Math.abs(oy) >= Math.abs(ox)) { if (oy > 0) { ox = -ox; oy = -oy; } }
+      else if (ox < 0) { ox = -ox; oy = -oy; }
+      const vertical = Math.abs(ox) > Math.abs(oy);
+      const d = 9;
+      const tx = s('text', {
+        x: m.x + ox * d, y: m.y + oy * d, class: 'wb-link-label',
+        'text-anchor': vertical ? (ox > 0 ? 'start' : 'end') : 'middle',
+        'dominant-baseline': vertical ? 'central' : (oy < 0 ? 'auto' : 'hanging'),
+      });
+      tx.textContent = e.label;
+      grp.append(tx);
+    }
+    g.append(grp);
+  }
+
+  function drawDraft(g) {
+    const A = anchor(arrowDraft.from);
+    if (!A) return;
+    const target = arrowDraft.hover ? anchor(arrowDraft.hover) : null;
+    const endPt = target ? clipTo(target, A.pt) : arrowDraft.pt;
+    const st = clipTo(A, target ? target.pt : arrowDraft.pt);
+    g.append(s('path', { d: `M${st.x},${st.y} L${endPt.x},${endPt.y}`, class: 'wb-draft' }), s('circle', { cx: endPt.x, cy: endPt.y, r: 4, class: 'wb-draft-dot' }));
+  }
+
+  function renderStatus() {
+    let text, state = saveState;
+    if (cfg.mode === 'standalone') {
+      text = saveState === 'unsaved' ? 'Unsaved changes. Use Save copy to keep them.' : (saveState === 'savedCopy' ? 'Copy saved' : 'Standalone copy');
+      state = saveState === 'unsaved' ? 'dirty' : 'saved';
+    } else {
+      text = { saved: 'Saved to board.json', saving: 'Saving…', dirty: 'Saving…', offline: 'Can’t reach the local server. Changes stay in this tab until it’s back.', error: saveMessage || 'Save failed' }[saveState] || '';
+    }
+    ui.status.textContent = text;
+    ui.status.dataset.state = state;
+  }
+
+  function applyView() {
+    ui.world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+    const g = GRID * view.z, G5 = g * 5;
+    ui.stage.style.backgroundSize = `${G5}px ${G5}px, ${G5}px ${G5}px, ${g}px ${g}px, ${g}px ${g}px`;
+    ui.stage.style.backgroundPosition = `${view.x}px ${view.y}px`;
+    ui.stage.classList.toggle('is-zoomed-out', g < 9);
+    clearTimeout(viewTimer);
+    viewTimer = setTimeout(() => storage('wb-view:' + (cfg.board || board.title), JSON.stringify(view)), 300);
+  }
+
+  function bounds() {
+    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+    const add = (x, y) => { x1 = Math.min(x1, x); y1 = Math.min(y1, y); x2 = Math.max(x2, x); y2 = Math.max(y2, y); };
+    for (const e of board.elements) if (isBox(e)) { const r = rectOf(e); add(r.x, r.y); add(r.x + r.w, r.y + r.h); }
+    for (const [id, g] of braceCache) { add(g.tip.x + g.out.x * 60, g.tip.y + g.out.y * 24); add(g.p1.x, g.p1.y); }
+    for (const e of board.elements) if (e.type === 'arrow') { const G = arrowGeom(e); if (G) { add(G.s.x, G.s.y); add(G.t.x, G.t.y); const m = qpt(G, 0.5); add(m.x, m.y); } }
+    return { x1, y1, x2, y2 };
+  }
+
+  function fit() {
+    const b = bounds();
+    const r = ui.stage.getBoundingClientRect();
+    if (!isFinite(b.x1)) { view.x = 40; view.y = 60; view.z = 1; applyView(); return; }
+    const top = 56, bottom = 80, side = 40;
+    const z = clamp(Math.min((r.width - 2 * side) / Math.max(1, b.x2 - b.x1), (r.height - top - bottom) / Math.max(1, b.y2 - b.y1)), 0.15, 1.25);
+    view.z = z;
+    view.x = (r.width - (b.x2 - b.x1) * z) / 2 - b.x1 * z;
+    view.y = top + (r.height - top - bottom - (b.y2 - b.y1) * z) / 2 - b.y1 * z;
+    applyView();
+  }
+  WB.fit = () => { renderLinks(); fit(); };
+
+  function zoomAt(cx, cy, z) {
+    z = clamp(z, 0.15, 3);
+    const r = ui.stage.getBoundingClientRect();
+    const px = cx - r.left, py = cy - r.top;
+    const wx = (px - view.x) / view.z, wy = (py - view.y) / view.z;
+    view.z = z;
+    view.x = px - wx * z;
+    view.y = py - wy * z;
+    applyView();
+  }
+  function zoomCenter(z) { const r = ui.stage.getBoundingClientRect(); zoomAt(r.left + r.width / 2, r.top + r.height / 2, z); }
+
+  function toWorld(cx, cy) {
+    const r = ui.stage.getBoundingClientRect();
+    return { x: (cx - r.left - view.x) / view.z, y: (cy - r.top - view.y) / view.z };
+  }
+  function toScreen(p) {
+    const r = ui.stage.getBoundingClientRect();
+    return { x: r.left + view.x + p.x * view.z, y: r.top + view.y + p.y * view.z };
+  }
+  function centerPoint() { const r = ui.stage.getBoundingClientRect(); return toWorld(r.left + r.width / 2 - 100, r.top + r.height / 2 - 60); }
+
+  function toast(msg, ms = 2600) {
+    ui.toast.textContent = msg;
+    ui.toast.classList.add('is-on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => ui.toast.classList.remove('is-on'), ms);
+  }
+
+  /* ---------------- changes, undo, saving ---------------- */
+  function snapshot() { return JSON.stringify(board); }
+  function pushUndo(snap) {
+    undoStack.push(snap || snapshot());
+    if (undoStack.length > 200) undoStack.shift();
+    redoStack = [];
+  }
+  function mutate(fn) { pushUndo(); fn(); afterChange(); }
+  function afterChange() { render(); markDirty(); }
+  function pruneSelection() { selected = new Set([...selected].filter((id) => byId(id))); }
+
+  function undo() {
+    if (editing) finishEdit();
+    if (!undoStack.length) return;
+    redoStack.push(snapshot());
+    board = normalize(JSON.parse(undoStack.pop()));
+    pruneSelection();
+    afterChange();
+  }
+  function redo() {
+    if (!redoStack.length) return;
+    undoStack.push(snapshot());
+    board = normalize(JSON.parse(redoStack.pop()));
+    pruneSelection();
+    afterChange();
+  }
+
+  function markDirty() {
+    if (cfg.mode === 'standalone') { saveState = 'unsaved'; renderStatus(); return; }
+    saveState = 'dirty';
+    renderStatus();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; saveNow(); }, 350);
+  }
+
+  async function saveNow() {
+    if (cfg.mode !== 'dev') return saveCopy();
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (saving) { saveQueued = true; return; }
+    saving = true;
+    saveState = 'saving';
+    renderStatus();
+    try {
+      const r = await fetch('/api/board/' + enc(cfg.board), {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ baseRev: rev, board }),
+      });
+      if (r.status === 409) {
+        const j = await r.json();
+        pushUndo();
+        board = normalize(j.board); rev = j.rev;
+        pruneSelection();
+        render();
+        toast('board.json changed on disk at the same moment, so that version is loaded. Your last change is one Undo away.', 6000);
+        saveState = 'saved';
+      } else if (r.ok) {
+        rev = (await r.json()).rev;
+        saveState = 'saved';
+      } else {
+        saveState = 'error';
+        saveMessage = 'Save failed: ' + (await r.text());
+      }
+    } catch (err) {
+      saveState = 'offline';
+      setTimeout(() => { if (saveState === 'offline') saveNow(); }, 2500);
+    }
+    saving = false;
+    renderStatus();
+    if (saveQueued) { saveQueued = false; saveNow(); }
+    if (pendingRemote && !gesture && !editing) applyRemote();
+  }
+
+  function usedAssets() {
+    const out = {};
+    for (const e of board.elements) if (e.type === 'picture' && assets[e.src]) out[e.src] = assets[e.src];
+    return out;
+  }
+
+  async function saveCopy() {
+    if (editing) finishEdit();
+    const data = { board, assets: usedAssets(), diagrams, savedAt: new Date().toISOString() };
+    const json = JSON.stringify(data).replace(/</g, '\\u003c');
+    const marker = '<script id="wb-data" type="application/json">';
+    const i = pristine.indexOf(marker);
+    const j = pristine.indexOf('</' + 'script>', i);
+    if (i < 0 || j < 0) { toast('Could not build the copy: this file is missing its data block.'); return; }
+    const html = pristine.slice(0, i + marker.length) + json + pristine.slice(j);
+    let name = decodeURIComponent((location.pathname.split('/').pop() || '').trim());
+    if (!/\.html?$/i.test(name)) name = (board.title || 'whiteboard').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '.html';
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'HTML file', accept: { 'text/html': ['.html'] } }] });
+        const w = await handle.createWritable();
+        await w.write(html);
+        await w.close();
+        saveState = 'savedCopy'; renderStatus(); toast('Copy saved');
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+      }
+    }
+    const a = h('a', { href: URL.createObjectURL(new Blob([html], { type: 'text/html' })), download: name });
+    document.body.append(a); a.click(); a.remove();
+    saveState = 'savedCopy'; renderStatus(); toast('Copy downloaded as ' + name);
+  }
+
+  async function exportHTML() {
+    await saveNow();
+    try {
+      const r = await fetch('/api/export/' + enc(cfg.board), { method: 'POST' });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'export failed');
+      toast('Exported ' + j.file + (j.missing && j.missing.length ? ' (missing: ' + j.missing.join(', ') + ')' : ''), 5000);
+    } catch (err) { toast('Export failed: ' + err.message, 5000); }
+  }
+
+  /* ---------------- live sync (dev) ---------------- */
+  function connectEvents() {
+    const es = new EventSource('/events?board=' + enc(cfg.board));
+    es.onmessage = (m) => {
+      let msg;
+      try { msg = JSON.parse(m.data); } catch (e) { return; }
+      if (msg.type === 'board' && msg.rev > rev) { pendingRemote = true; if (!editing && !gesture && !saving && !saveTimer) applyRemote(); }
+      else if (msg.type === 'diagram') reloadDiagram(msg.src);
+      else if (msg.type === 'asset') reloadAsset(msg.src);
+      else if (msg.type === 'engine') location.reload();
+      else if (msg.type === 'error') toast(msg.message, 7000);
+    };
+    es.onerror = () => { if (saveState === 'saved') { saveState = 'offline'; renderStatus(); } };
+    es.onopen = () => { if (saveState === 'offline') { saveState = 'saved'; renderStatus(); pendingRemote = true; applyRemote(); } };
+  }
+
+  async function applyRemote() {
+    pendingRemote = false;
+    try {
+      const r = await fetch('/api/board/' + enc(cfg.board));
+      const j = await r.json();
+      if (j.rev <= rev) return;
+      if (editing || gesture) { pendingRemote = true; return; }
+      pushUndo();
+      board = normalize(j.board);
+      rev = j.rev;
+      pruneSelection();
+      render();
+      toast('Updated from board.json', 1400);
+    } catch (e) { /* will retry on next event */ }
+  }
+
+  function reloadDiagram(src) {
+    bust[src] = Date.now();
+    for (const e of board.elements) {
+      if (e.type !== 'diagram' || e.src !== src) continue;
+      const n = nodes.get(e.id);
+      const f = n && n.el.querySelector('iframe');
+      if (f && cfg.mode === 'dev') f.src = assetURL(src);
+    }
+  }
+  function reloadAsset(src) {
+    bust[src] = Date.now();
+    for (const e of board.elements) {
+      if (e.type !== 'picture' || e.src !== src) continue;
+      const n = nodes.get(e.id);
+      const img = n && n.el.querySelector('img');
+      if (img) img.src = assetURL(src);
+    }
+  }
+
+  /* ---------------- element operations ---------------- */
+  function removeElements(ids) {
+    const set = new Set(ids);
+    for (const e of board.elements) {
+      if (set.has(e.id)) continue;
+      if (e.type === 'arrow') {
+        for (const w of ['from', 'to']) {
+          if (typeof e[w] === 'string' && set.has(e[w])) {
+            const G = arrowGeom(e);
+            const p = G ? (w === 'from' ? G.s : G.t) : { x: 0, y: 0 };
+            e[w] = { x: Math.round(p.x), y: Math.round(p.y) };
+          }
+        }
+      }
+      if (e.type === 'brace') e.members = e.members.filter((m) => !set.has(m));
+    }
+    board.elements = board.elements.filter((e) => !set.has(e.id) && !(e.type === 'brace' && !e.members.length));
+    pruneSelection();
+  }
+
+  function deleteSelection() {
+    if (!selected.size) return;
+    pushUndo();
+    removeElements([...selected]);
+    selected.clear();
+    afterChange();
+  }
+
+  function duplicate() {
+    const boxes = [...selected].map(byId).filter(isBox);
+    if (!boxes.length) return;
+    pushUndo();
+    const fresh = [];
+    for (const e of boxes) {
+      const c = JSON.parse(JSON.stringify(e));
+      c.id = uid(e.type[0]);
+      c.x += GRID; c.y += GRID;
+      board.elements.push(c);
+      fresh.push(c.id);
+    }
+    selected = new Set(fresh);
+    afterChange();
+  }
+
+  function braceFromSelection() {
+    const sel = [...selected].map(byId).filter(Boolean);
+    const boxes = sel.filter(isBox).map((e) => e.id);
+    const braces = sel.filter((e) => e.type === 'brace');
+    if (!boxes.length) { toast('Select the boxes to group first. Shift-click to pick several.'); return; }
+    pushUndo();
+    if (braces.length === 1) {
+      braces[0].members = boxes;
+      selected = new Set([braces[0].id]);
+    } else {
+      const b = { id: uid('b'), type: 'brace', members: boxes, side: 'right' };
+      board.elements.push(b);
+      selected = new Set([b.id]);
+    }
+    afterChange();
+  }
+
+  function toggleStyleOrSide() {
+    const sel = [...selected].map(byId).filter(Boolean);
+    if (sel.length && sel.every((e) => e.type === 'arrow')) {
+      const next = sel[0].style === 'sequence' ? 'equivalence' : 'sequence';
+      mutate(() => sel.forEach((e) => { e.style = next; }));
+    } else if (sel.length === 1 && sel[0].type === 'brace') {
+      const b = sel[0];
+      mutate(() => { b.side = SIDES[(SIDES.indexOf(b.side) + 1) % SIDES.length]; });
+    } else if (tool === 'arrow') {
+      draftStyle = draftStyle === 'sequence' ? 'equivalence' : 'sequence';
+      renderTray();
+    }
+  }
+
+  function addText(p, text) {
+    pushUndo();
+    const e = { id: uid('t'), type: 'text', x: snap(p.x), y: snap(p.y), w: 220, variant: 'card', text: text || '' };
+    board.elements.push(e);
+    selected = new Set([e.id]);
+    render();
+    return e;
+  }
+
+  function readAsDataURL(file) {
+    return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+  }
+  function imageSize(url) {
+    return new Promise((res) => { const i = new Image(); i.onload = () => res({ w: i.naturalWidth, h: i.naturalHeight }); i.onerror = () => res({ w: 320, h: 240 }); i.src = url; });
+  }
+
+  async function addImageFiles(files, p) {
+    files = files.filter((f) => f && f.type && f.type.startsWith('image/'));
+    if (!files.length) return;
+    const before = snapshot();
+    let x = snap(p.x), y = snap(p.y);
+    const added = [];
+    for (const f of files) {
+      const dataURL = await readAsDataURL(f);
+      const dim = await imageSize(dataURL);
+      let src;
+      const name = (f.name && f.name !== 'image.png' ? f.name : 'pasted-' + Date.now().toString(36) + '.' + (f.type.split('/')[1] || 'png').replace('svg+xml', 'svg'));
+      if (cfg.mode === 'dev') {
+        try {
+          const r = await fetch('/api/asset/' + enc(cfg.board) + '/' + enc(name), { method: 'PUT', body: f });
+          if (!r.ok) throw new Error(await r.text());
+          src = (await r.json()).src;
+        } catch (err) { toast('Could not save the picture: ' + err.message, 5000); continue; }
+      } else {
+        let n = 'assets/' + name.replace(/[^\w.-]+/g, '-'), k = 2;
+        while (assets[n]) n = 'assets/' + (k++) + '-' + name.replace(/[^\w.-]+/g, '-');
+        src = n;
+        assets[src] = dataURL;
+      }
+      const w = snap(Math.min(320, dim.w || 320));
+      const hgt = snap(w * (dim.h || 240) / (dim.w || 320)) + 12;
+      const e = { id: uid('p'), type: 'picture', x, y, w: w + 12, h: hgt, src };
+      board.elements.push(e);
+      added.push(e.id);
+      x += w + 52;
+    }
+    if (!added.length) return;
+    pushUndo(before);
+    selected = new Set(added);
+    afterChange();
+  }
+
+  /* ---------------- text editing ---------------- */
+  function startEdit(id, isNew) {
+    const e = byId(id), n = nodes.get(id);
+    if (!e || !n || e.type !== 'text') return;
+    if (editing) finishEdit();
+    editing = id;
+    editIsNew = !!isNew;
+    editSnapshot = isNew ? null : snapshot();
+    const t = n.el.querySelector('.wb-txt');
+    t.textContent = e.text;
+    try { t.contentEditable = 'plaintext-only'; } catch (err) { /* older browsers */ }
+    if (t.contentEditable !== 'plaintext-only') t.contentEditable = 'true';
+    n.el.classList.add('is-editing');
+    t.focus();
+    const range = document.createRange();
+    range.selectNodeContents(t);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    t.oninput = () => scheduleLinks();
+    renderLinks();
+  }
+
+  function finishEdit() {
+    const id = editing;
+    if (!id) return;
+    editing = null;
+    const e = byId(id), n = nodes.get(id);
+    const t = n && n.el.querySelector('.wb-txt');
+    let text = e ? e.text : '';
+    if (t) {
+      text = t.innerText.replace(/ /g, ' ').replace(/\n+$/, '');
+      t.contentEditable = 'false';
+      t.removeAttribute('contenteditable');
+      t.oninput = null;
+      n.el.classList.remove('is-editing');
+    }
+    if (!e) return;
+    if (!text.trim()) {
+      if (editIsNew) { removeElements([id]); undoStack.pop(); render(); }
+      else { pushUndo(editSnapshot); removeElements([id]); afterChange(); }
+    } else if (text !== e.text || editIsNew) {
+      if (!editIsNew) pushUndo(editSnapshot);
+      e.text = text;
+      n.sig = null;
+      afterChange();
+    } else {
+      t.innerHTML = richText(e.text);
+      render();
+    }
+    if (pendingRemote) applyRemote();
+  }
+
+  function editLabel(e) {
+    if (!e) return;
+    const field = e.type === 'picture' ? 'caption' : e.type === 'diagram' ? 'title' : e.type === 'text' ? null : 'label';
+    if (!field) { startEdit(e.id); return; }
+    let p;
+    if (e.type === 'arrow') { const G = arrowGeom(e); if (!G) return; p = qpt(G, 0.5); }
+    else if (e.type === 'brace') { const g = braceCache.get(e.id); if (!g) return; p = { x: g.tip.x + g.out.x * 60, y: g.tip.y + g.out.y * 24 }; }
+    else if (e.type === 'diagram') p = { x: e.x + e.w / 2, y: e.y + 14 };
+    else p = { x: e.x + e.w / 2, y: e.y + e.h - 12 };
+    const sp = toScreen(p);
+    ui.editor.style.left = clamp(sp.x, 120, window.innerWidth - 120) + 'px';
+    ui.editor.style.top = clamp(sp.y, 30, window.innerHeight - 90) + 'px';
+    ui.editor.hidden = false;
+    ui.editorInput.value = e[field] || '';
+    ui.editorInput.placeholder = { label: 'Label', caption: 'Caption', title: 'Diagram title' }[field];
+    labelCtx = { id: e.id, field };
+    ui.editorInput.focus();
+    ui.editorInput.select();
+  }
+
+  function closeLabel(commit) {
+    if (!labelCtx) return;
+    const { id, field } = labelCtx;
+    labelCtx = null;
+    ui.editor.hidden = true;
+    const e = byId(id);
+    if (!commit || !e) return;
+    const v = ui.editorInput.value.trim();
+    if (v === (e[field] || '')) return;
+    mutate(() => { if (v) e[field] = v; else delete e[field]; });
+  }
+
+  /* ---------------- pointer interaction ---------------- */
+  function targetAt(cx, cy, excludeId) {
+    for (const el of document.elementsFromPoint(cx, cy)) {
+      if (el.closest('[data-handle]')) continue;
+      const b = el.closest('.wb-box');
+      if (b && b.dataset.id !== excludeId) return b.dataset.id;
+      const l = el.closest('[data-link]');
+      if (l) { const e = byId(l.dataset.link); if (e && e.type === 'brace' && e.id !== excludeId) return e.id; }
+      if (el === ui.stage) break;
+    }
+    return null;
+  }
+
+  function setDrop(id) {
+    for (const [nid, n] of nodes) n.el.classList.toggle('is-drop', nid === id);
+  }
+
+  function onPointerDown(ev) {
+    if (ev.target.closest('.wb-label-editor')) return;
+    if (labelCtx) closeLabel(true);
+    if (!ui.help.hidden && !ev.target.closest('.wb-help')) toggleHelp(false);
+    const p = toWorld(ev.clientX, ev.clientY);
+    if (ev.button === 1 || (ev.button === 0 && spaceDown)) { ev.preventDefault(); startPan(ev, false); return; }
+    if (ev.button !== 0) return;
+    const boxEl = ev.target.closest('.wb-box');
+    if (editing) {
+      if (boxEl && boxEl.dataset.id === editing && !ev.target.closest('[data-handle]')) return;
+      finishEdit();
+    }
+    if (tool === 'text') {
+      if (boxEl) { setTool('select'); } else {
+        ev.preventDefault();
+        const e = addText(p);
+        setTool('select');
+        requestAnimationFrame(() => startEdit(e.id, true));
+        return;
+      }
+    }
+    if (tool === 'arrow') { ev.preventDefault(); arrowDown(ev, p); return; }
+    const handle = ev.target.closest('[data-handle]');
+    if (handle) { ev.preventDefault(); startHandle(ev, p, handle); return; }
+    if (boxEl) {
+      const id = boxEl.dataset.id;
+      if (ev.shiftKey) { if (selected.has(id)) selected.delete(id); else selected.add(id); }
+      else if (!selected.has(id)) selected = new Set([id]);
+      render();
+      startMove(ev, p, id);
+      return;
+    }
+    const linkEl = ev.target.closest('[data-link]');
+    if (linkEl) {
+      ev.preventDefault();
+      const id = linkEl.dataset.link;
+      if (ev.shiftKey) { if (selected.has(id)) selected.delete(id); else selected.add(id); }
+      else selected = new Set([id]);
+      render();
+      if (byId(id) && byId(id).type === 'brace') startMove(ev, p, id);
+      return;
+    }
+    if (ev.shiftKey) startMarquee(ev, p); else startPan(ev, true);
+  }
+
+  function capture(ev) { try { ui.stage.setPointerCapture(ev.pointerId); } catch (e) { /* ignore */ } }
+
+  function startPan(ev, clearOnClick) {
+    gesture = { kind: 'pan', sx: ev.clientX, sy: ev.clientY, vx: view.x, vy: view.y, moved: false, clearOnClick };
+    ui.stage.classList.add('is-panning');
+    capture(ev);
+  }
+
+  function startMarquee(ev, p) {
+    gesture = { kind: 'marquee', sx: ev.clientX, sy: ev.clientY, p0: p, base: new Set(selected) };
+    capture(ev);
+  }
+
+  function startMove(ev, p, clickedId) {
+    const ids = new Set();
+    for (const id of selected) {
+      const e = byId(id);
+      if (isBox(e)) ids.add(id);
+      else if (e && e.type === 'brace') e.members.forEach((m) => ids.add(m));
+    }
+    const orig = new Map([...ids].map((id) => { const e = byId(id); return [id, { x: e.x, y: e.y }]; }).filter(([id]) => byId(id)));
+    gesture = { kind: 'move', sx: ev.clientX, sy: ev.clientY, p0: p, orig, before: snapshot(), moved: false, clickedId, shift: ev.shiftKey };
+    capture(ev);
+  }
+
+  function startHandle(ev, p, handle) {
+    const kind = handle.dataset.handle;
+    if (kind === 'resize') {
+      const id = handle.closest('.wb-box').dataset.id;
+      const e = byId(id);
+      const r = rectOf(e);
+      gesture = { kind: 'resize', id, p0: p, w: e.w, h: r.h, before: snapshot(), moved: false };
+    } else {
+      const e = single();
+      if (!e || e.type !== 'arrow') return;
+      gesture = { kind: kind === 'mid' ? 'curve' : 'arrowEnd', id: e.id, which: kind, p0: p, pt: null, before: snapshot(), moved: false };
+      ui.stage.classList.add('is-linking');
+    }
+    ui.stage.classList.add('is-dragging');
+    capture(ev);
+  }
+
+  function arrowDown(ev, p) {
+    const tgt = targetAt(ev.clientX, ev.clientY);
+    if (!arrowDraft) {
+      arrowDraft = { from: tgt || { x: snap(p.x), y: snap(p.y) }, pt: p, hover: null, sx: ev.clientX, sy: ev.clientY };
+      gesture = { kind: 'arrowDraft' };
+      ui.stage.classList.add('is-linking');
+      capture(ev);
+      renderLinks();
+      return;
+    }
+    finishArrow(tgt, p);
+  }
+
+  function finishArrow(tgt, p) {
+    const from = arrowDraft.from;
+    arrowDraft = null;
+    ui.stage.classList.remove('is-linking');
+    setDrop(null);
+    const to = tgt || { x: snap(p.x), y: snap(p.y) };
+    if (typeof from === 'string' && from === to) { renderLinks(); return; }
+    pushUndo();
+    const a = { id: uid('a'), type: 'arrow', from, to, style: draftStyle };
+    board.elements.push(a);
+    selected = new Set([a.id]);
+    tool = 'select';
+    ui.stage.classList.remove('tool-arrow');
+    afterChange();
+  }
+
+  function onPointerMove(ev) {
+    const p = toWorld(ev.clientX, ev.clientY);
+    if (arrowDraft) {
+      arrowDraft.pt = p;
+      const hov = targetAt(ev.clientX, ev.clientY, typeof arrowDraft.from === 'string' ? arrowDraft.from : null);
+      arrowDraft.hover = hov;
+      setDrop(hov);
+      scheduleLinks();
+    }
+    if (!gesture) return;
+    const g = gesture;
+    if (g.kind === 'pan') {
+      const dx = ev.clientX - g.sx, dy = ev.clientY - g.sy;
+      if (Math.abs(dx) + Math.abs(dy) > 3) g.moved = true;
+      view.x = g.vx + dx; view.y = g.vy + dy;
+      applyView();
+    } else if (g.kind === 'marquee') {
+      const x = Math.min(g.sx, ev.clientX), y = Math.min(g.sy, ev.clientY);
+      const r = ui.stage.getBoundingClientRect();
+      Object.assign(ui.marquee.style, { left: x - r.left + 'px', top: y - r.top + 'px', width: Math.abs(ev.clientX - g.sx) + 'px', height: Math.abs(ev.clientY - g.sy) + 'px' });
+      ui.marquee.hidden = false;
+      const a = g.p0, x1 = Math.min(a.x, p.x), y1 = Math.min(a.y, p.y), x2 = Math.max(a.x, p.x), y2 = Math.max(a.y, p.y);
+      const next = new Set(g.base);
+      for (const e of board.elements) {
+        if (!isBox(e)) continue;
+        const rr = rectOf(e);
+        if (rr.x < x2 && rr.x + rr.w > x1 && rr.y < y2 && rr.y + rr.h > y1) next.add(e.id);
+      }
+      selected = next;
+      renderBoxes();
+    } else if (g.kind === 'move') {
+      if (!g.moved && Math.abs(ev.clientX - g.sx) + Math.abs(ev.clientY - g.sy) < 4) return;
+      if (!g.moved) { g.moved = true; ui.stage.classList.add('is-dragging'); }
+      const dx = p.x - g.p0.x, dy = p.y - g.p0.y;
+      for (const [id, o] of g.orig) {
+        const e = byId(id);
+        if (!e) continue;
+        e.x = ev.altKey ? Math.round(o.x + dx) : snap(o.x + dx);
+        e.y = ev.altKey ? Math.round(o.y + dy) : snap(o.y + dy);
+        const n = nodes.get(id);
+        if (n) placeBox(n.el, e);
+      }
+      scheduleLinks();
+    } else if (g.kind === 'resize') {
+      g.moved = true;
+      const e = byId(g.id);
+      const dx = p.x - g.p0.x, dy = p.y - g.p0.y;
+      e.w = Math.max(60, ev.altKey ? Math.round(g.w + dx) : snap(g.w + dx));
+      if (e.type !== 'text') e.h = Math.max(60, ev.altKey ? Math.round(g.h + dy) : snap(g.h + dy));
+      placeBox(nodes.get(g.id).el, e);
+      scheduleLinks();
+    } else if (g.kind === 'arrowEnd') {
+      g.moved = true;
+      g.pt = p;
+      const e = byId(g.id);
+      const other = e[g.which === 'from' ? 'to' : 'from'];
+      const hov = targetAt(ev.clientX, ev.clientY, typeof other === 'string' ? other : null);
+      g.hover = hov;
+      setDrop(hov);
+      scheduleLinks();
+    } else if (g.kind === 'curve') {
+      g.moved = true;
+      const e = byId(g.id);
+      const saved = e.curve;
+      e.curve = 0;
+      const G = arrowGeom(e);
+      e.curve = saved;
+      if (!G) return;
+      let c = 2 * ((p.x - G.mid.x) * G.n.x + (p.y - G.mid.y) * G.n.y);
+      if (Math.abs(c) < 12) c = 0;
+      e.curve = Math.round(c);
+      if (!e.curve) delete e.curve;
+      scheduleLinks();
+    }
+  }
+
+  function onPointerUp(ev) {
+    const g = gesture;
+    if (!g) return;
+    gesture = null;
+    ui.stage.classList.remove('is-panning', 'is-dragging');
+    if (g.kind === 'arrowDraft') {
+      if (arrowDraft && Math.abs(ev.clientX - arrowDraft.sx) + Math.abs(ev.clientY - arrowDraft.sy) > 8) {
+        finishArrow(targetAt(ev.clientX, ev.clientY, typeof arrowDraft.from === 'string' ? arrowDraft.from : null), toWorld(ev.clientX, ev.clientY));
+      }
+      return; // otherwise wait for a second click
+    }
+    ui.stage.classList.remove('is-linking');
+    if (g.kind === 'pan') {
+      if (!g.moved && g.clearOnClick && selected.size) { selected.clear(); render(); }
+    } else if (g.kind === 'marquee') {
+      ui.marquee.hidden = true;
+      render();
+    } else if (g.kind === 'move') {
+      if (g.moved) { pushUndo(g.before); afterChange(); }
+      else if (!g.shift && g.clickedId && selected.size > 1 && isBox(byId(g.clickedId))) { selected = new Set([g.clickedId]); render(); }
+    } else if (g.kind === 'resize') {
+      if (g.moved) { pushUndo(g.before); afterChange(); }
+    } else if (g.kind === 'arrowEnd') {
+      setDrop(null);
+      if (g.moved && g.pt) {
+        const e = byId(g.id);
+        e[g.which] = g.hover || { x: snap(g.pt.x), y: snap(g.pt.y) };
+        pushUndo(g.before);
+        afterChange();
+      } else renderLinks();
+    } else if (g.kind === 'curve') {
+      if (g.moved) { pushUndo(g.before); afterChange(); }
+    }
+    if (pendingRemote && !editing) applyRemote();
+  }
+
+  function onDblClick(ev) {
+    if (tool !== 'select') return;
+    // pointer capture makes ev.target the stage, so look at what is actually under the pointer
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY) || ev.target;
+    if (!ui.stage.contains(hit)) return;
+    const boxEl = hit.closest('.wb-box');
+    if (boxEl) {
+      const e = byId(boxEl.dataset.id);
+      if (!e) return;
+      if (e.type === 'text') startEdit(e.id); else editLabel(e);
+      return;
+    }
+    const linkEl = hit.closest('[data-link]');
+    if (linkEl) { editLabel(byId(linkEl.dataset.link)); return; }
+    if (hit.closest('.wb-stage')) {
+      const e = addText(toWorld(ev.clientX, ev.clientY));
+      requestAnimationFrame(() => startEdit(e.id, true));
+    }
+  }
+
+  function onKeyDown(ev) {
+    if (editing) {
+      if (ev.key === 'Escape' || (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey))) { ev.preventDefault(); finishEdit(); }
+      return;
+    }
+    if (labelCtx) {
+      if (ev.key === 'Enter') { ev.preventDefault(); closeLabel(true); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); closeLabel(false); }
+      return;
+    }
+    const tag = ev.target && ev.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const mod = ev.ctrlKey || ev.metaKey;
+    const k = ev.key.length === 1 ? ev.key.toLowerCase() : ev.key;
+    if (mod) {
+      if (k === 'z') { ev.preventDefault(); if (ev.shiftKey) redo(); else undo(); }
+      else if (k === 'y') { ev.preventDefault(); redo(); }
+      else if (k === 's') { ev.preventDefault(); if (cfg.mode === 'dev') saveNow(); else saveCopy(); }
+      else if (k === 'd') { ev.preventDefault(); duplicate(); }
+      else if (k === 'a') { ev.preventDefault(); selected = new Set(board.elements.map((e) => e.id)); render(); }
+      return;
+    }
+    if (ev.altKey) return;
+    const nudge = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+    if (nudge) {
+      const boxes = [...selected].map(byId).filter(isBox);
+      if (!boxes.length) return;
+      ev.preventDefault();
+      const step = ev.shiftKey ? GRID : 1;
+      mutate(() => boxes.forEach((e) => { e.x += nudge[0] * step; e.y += nudge[1] * step; }));
+      return;
+    }
+    switch (k) {
+      case 'Delete': case 'Backspace': if (selected.size) { ev.preventDefault(); deleteSelection(); } break;
+      case 'Escape':
+        if (arrowDraft) { arrowDraft = null; ui.stage.classList.remove('is-linking'); setDrop(null); }
+        tool = 'text'; setTool('select'); selected.clear(); toggleHelp(false); render(); break;
+      case 'v': setTool('select'); break;
+      case 't': setTool('text'); break;
+      case 'a': setTool('arrow'); break;
+      case 'b': braceFromSelection(); break;
+      case 'p': ui.file.click(); break;
+      case 's': toggleStyleOrSide(); break;
+      case 'f': fit(); break;
+      case '0': zoomCenter(1); break;
+      case '=': case '+': zoomCenter(view.z * 1.2); break;
+      case '-': zoomCenter(view.z / 1.2); break;
+      case '?': toggleHelp(); break;
+      case 'Enter': { const one = single(); if (one) { ev.preventDefault(); if (one.type === 'text') startEdit(one.id); else editLabel(one); } break; }
+      case ' ': if (!spaceDown) { spaceDown = true; ui.stage.classList.add('space-pan'); } ev.preventDefault(); break;
+      default: break;
+    }
+  }
+
+  function bindEvents() {
+    ui.stage.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    ui.stage.addEventListener('dblclick', onDblClick);
+    ui.stage.addEventListener('wheel', (ev) => {
+      ev.preventDefault();
+      if (ev.ctrlKey || ev.metaKey) zoomAt(ev.clientX, ev.clientY, view.z * Math.exp(-ev.deltaY * 0.01));
+      else { view.x -= ev.deltaX; view.y -= ev.deltaY; applyView(); }
+    }, { passive: false });
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', (ev) => { if (ev.key === ' ') { spaceDown = false; ui.stage.classList.remove('space-pan'); } });
+    ui.editorInput.addEventListener('blur', () => closeLabel(true));
+    window.addEventListener('resize', () => scheduleLinks());
+    document.addEventListener('paste', async (ev) => {
+      if (editing || labelCtx) return;
+      const items = [...(ev.clipboardData ? ev.clipboardData.items : [])];
+      const files = items.filter((i) => i.kind === 'file').map((i) => i.getAsFile()).filter(Boolean);
+      if (files.length) { ev.preventDefault(); addImageFiles(files, centerPoint()); return; }
+      const text = ev.clipboardData && ev.clipboardData.getData('text/plain');
+      if (text && text.trim()) { ev.preventDefault(); addText(centerPoint(), text.trim()); afterChange(); }
+    });
+    ui.stage.addEventListener('dragover', (ev) => { ev.preventDefault(); });
+    ui.stage.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      const files = [...(ev.dataTransfer ? ev.dataTransfer.files : [])];
+      if (files.length) addImageFiles(files, toWorld(ev.clientX, ev.clientY));
+    });
+  }
+
+  /* ---------------- layout report (used by `npm run check`) ---------------- */
+  WB.layoutReport = function () {
+    renderLinks();
+    const boxes = board.elements.filter(isBox).map((e) => Object.assign({ id: e.id }, rectOf(e)));
+    const hit = (a, b, m) => a.x < b.x + b.w - m && b.x < a.x + a.w - m && a.y < b.y + b.h - m && b.y < a.y + a.h - m;
+    const overlaps = [], tooClose = [];
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i], b = boxes[j];
+        if (hit(a, b, 2)) overlaps.push([a.id, b.id]);
+        else {
+          const gx = Math.max(b.x - (a.x + a.w), a.x - (b.x + b.w), 0);
+          const gy = Math.max(b.y - (a.y + a.h), a.y - (b.y + b.h), 0);
+          if (Math.max(gx, gy) < 16) tooClose.push([a.id, b.id, Math.round(Math.max(gx, gy))]);
+        }
+      }
+    }
+    const arrowsThroughBoxes = [];
+    for (const e of board.elements) {
+      if (e.type !== 'arrow') continue;
+      const G = arrowGeom(e);
+      if (!G) continue;
+      const ends = new Set();
+      for (const w of ['from', 'to']) {
+        const r = byId(e[w]);
+        if (r) { ends.add(r.id); if (r.type === 'brace') r.members.forEach((m) => ends.add(m)); }
+      }
+      for (const b of boxes) {
+        if (ends.has(b.id)) continue;
+        for (let k = 0.08; k <= 0.92; k += 0.04) {
+          const q = qpt(G, k);
+          if (q.x > b.x + 3 && q.x < b.x + b.w - 3 && q.y > b.y + 3 && q.y < b.y + b.h - 3) { arrowsThroughBoxes.push([e.id, b.id]); break; }
+        }
+      }
+    }
+    const bracesCrossingBoxes = [];
+    for (const [id, g] of braceCache) {
+      const xs = [g.p1.x, g.p2.x, g.tip.x], ys = [g.p1.y, g.p2.y, g.tip.y];
+      const r = { x: Math.min(...xs) - 2, y: Math.min(...ys) - 2, w: Math.max(...xs) - Math.min(...xs) + 4, h: Math.max(...ys) - Math.min(...ys) + 4 };
+      const members = new Set(byId(id).members);
+      for (const b of boxes) if (!members.has(b.id) && hit(r, b, 0)) bracesCrossingBoxes.push([id, b.id]);
+    }
+    const broken = [];
+    for (const [id, n] of nodes) if (n.el.classList.contains('is-broken')) broken.push(id);
+    const dangling = [];
+    for (const e of board.elements) {
+      if (e.type === 'arrow') for (const w of ['from', 'to']) if (typeof e[w] === 'string' && !byId(e[w])) dangling.push(e.id + '.' + w + ' -> ' + e[w]);
+      if (e.type === 'brace') for (const m of e.members) if (!byId(m)) dangling.push(e.id + '.members -> ' + m);
+    }
+    const b = bounds();
+    return {
+      elements: board.elements.length, boxes: boxes.length,
+      bounds: { x: Math.round(b.x1), y: Math.round(b.y1), w: Math.round(b.x2 - b.x1), h: Math.round(b.y2 - b.y1) },
+      overlaps, tooClose, arrowsThroughBoxes, bracesCrossingBoxes, brokenPictures: broken, danglingRefs: dangling,
+      measured: Object.fromEntries(boxes.map((x) => [x.id, { x: x.x, y: x.y, w: Math.round(x.w), h: Math.round(x.h) }])),
+    };
+  };
+  WB.setView = function (x, y, z) { view.x = x; view.y = y; view.z = z; applyView(); };
+})();
+
+</script>
+<script>WB.boot({"mode":"standalone","board":"asm-stack-frames"});</script>
+</body>
+</html>
